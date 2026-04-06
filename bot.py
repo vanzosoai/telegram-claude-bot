@@ -193,6 +193,18 @@ tools = [
             "properties": {},
             "required": []
         }
+    },
+    {
+        "name": "run_background",
+        "description": "Run a long-running command in the background (builds, deploys, tests). The user will be notified via Telegram when it finishes. Use this instead of run_command for anything that might take more than 30 seconds.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "The shell command to run in the background"},
+                "label": {"type": "string", "description": "Short description like 'npm build' or 'deploy to prod'"}
+            },
+            "required": ["command"]
+        }
     }
 ]
 
@@ -213,7 +225,7 @@ def is_safe_path(path):
             return True
     return False
 
-def execute_tool(tool_name, tool_input):
+def execute_tool(tool_name, tool_input, chat_id=None):
     log_activity("tool_call", detail=f"{tool_name}: {json.dumps(tool_input)[:300]}")
     try:
         if tool_name == "run_command":
@@ -285,14 +297,49 @@ def execute_tool(tool_name, tool_input):
             return "\n".join(entries) if entries else "No projects found in ~/Projects"
 
         elif tool_name == "screenshot":
-            screenshot_path = "/tmp/bot_screenshot.png"
+            screenshot_raw = "/tmp/bot_screenshot_raw.png"
+            screenshot_path = "/tmp/bot_screenshot.jpg"
+            # Capture screenshot
             result = subprocess.run(
-                ["screencapture", "-x", screenshot_path],
+                ["screencapture", "-x", screenshot_raw],
                 capture_output=True, text=True, timeout=10
             )
-            if result.returncode == 0 and os.path.exists(screenshot_path):
+            if result.returncode != 0 or not os.path.exists(screenshot_raw):
+                return f"Failed to take screenshot: {result.stderr}"
+            # Resize to max 1920px wide and compress as JPEG for Telegram
+            subprocess.run(
+                ["sips", "--resampleWidth", "1920", "--setProperty", "format", "jpeg",
+                 "--setProperty", "formatOptions", "60", screenshot_raw, "--out", screenshot_path],
+                capture_output=True, text=True, timeout=10
+            )
+            if os.path.exists(screenshot_path):
                 return f"SCREENSHOT_SAVED:{screenshot_path}"
-            return f"Failed to take screenshot: {result.stderr}"
+            return f"SCREENSHOT_SAVED:{screenshot_raw}"
+
+        elif tool_name == "run_background":
+            command = tool_input["command"]
+            label = tool_input.get("label", command[:50])
+            safe, reason = is_safe_command(command)
+            if not safe:
+                return f"🚫 Command blocked for safety: {reason}"
+            # Launch in background, capture output to a log file
+            log_file = f"/tmp/bg_{int(time.time())}.log"
+            proc = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=open(log_file, 'w'),
+                stderr=subprocess.STDOUT
+            )
+            # Register with build watcher for notifications
+            if chat_id:
+                build_watchers[proc.pid] = {
+                    "command": label,
+                    "chat_id": chat_id,
+                    "start": time.time(),
+                    "log_file": log_file
+                }
+            log_activity("background_started", detail=f"PID {proc.pid}: {label}")
+            return f"⏳ Running in background (PID {proc.pid}): {label}\nYou'll get a notification when it finishes.\nLog: {log_file}"
 
     except subprocess.TimeoutExpired:
         return "⚠️ Command timed out (60s limit)"
@@ -439,7 +486,7 @@ You are running as: {model_label} {"Haiku (fast)" if "haiku" in model else "Sonn
                     tool_input = block.input
                     label = tool_input.get('command', tool_name)
                     status_message += f"⚙️ `{label}`\n"
-                    result = execute_tool(tool_name, tool_input)
+                    result = execute_tool(tool_name, tool_input, chat_id=update.effective_chat.id)
 
                     # Handle screenshot - send as photo in Telegram
                     if result and result.startswith("SCREENSHOT_SAVED:"):
@@ -555,13 +602,25 @@ build_watchers = {}  # pid -> {"command": str, "chat_id": int, "start": float}
 async def check_builds(context):
     """Check if any watched build processes have finished"""
     finished = []
-    for pid, info in build_watchers.items():
+    for pid, info in list(build_watchers.items()):
         try:
             os.kill(pid, 0)  # Check if still running
         except OSError:
             # Process finished
             elapsed = int(time.time() - info["start"])
-            msg = f"🔔 Build finished ({elapsed}s): `{info['command'][:100]}`"
+            # Read last few lines of output
+            tail = ""
+            log_file = info.get("log_file")
+            if log_file and os.path.exists(log_file):
+                try:
+                    with open(log_file, 'r') as f:
+                        lines = f.readlines()
+                        tail = "".join(lines[-5:]).strip()
+                        if tail:
+                            tail = f"\n```\n{tail[:500]}\n```"
+                except:
+                    pass
+            msg = f"🔔 *Done* ({elapsed}s): `{info['command'][:100]}`{tail}"
             try:
                 await context.bot.send_message(
                     chat_id=info["chat_id"],
