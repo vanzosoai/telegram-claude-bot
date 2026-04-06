@@ -8,7 +8,7 @@ import signal
 import atexit
 from datetime import datetime, time as dt_time
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
 import anthropic
 
 # === SINGLE INSTANCE LOCK ===
@@ -85,6 +85,44 @@ client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 conversation_history = {}
 
+# Token usage tracking
+BOT_START_TIME = time.time()
+token_usage = {
+    "total_input": 0,
+    "total_output": 0,
+    "session_messages": 0,
+    "by_model": {}
+}
+
+# Approximate costs per million tokens (April 2026)
+TOKEN_COSTS = {
+    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00},
+    "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00},
+}
+
+def track_tokens(response, model):
+    """Track token usage from an API response"""
+    if hasattr(response, 'usage'):
+        inp = response.usage.input_tokens
+        out = response.usage.output_tokens
+        token_usage["total_input"] += inp
+        token_usage["total_output"] += out
+        token_usage["session_messages"] += 1
+        if model not in token_usage["by_model"]:
+            token_usage["by_model"][model] = {"input": 0, "output": 0, "calls": 0}
+        token_usage["by_model"][model]["input"] += inp
+        token_usage["by_model"][model]["output"] += out
+        token_usage["by_model"][model]["calls"] += 1
+
+def estimate_cost():
+    """Estimate session cost in USD"""
+    total = 0.0
+    for model, usage in token_usage["by_model"].items():
+        costs = TOKEN_COSTS.get(model, {"input": 3.00, "output": 15.00})
+        total += (usage["input"] / 1_000_000) * costs["input"]
+        total += (usage["output"] / 1_000_000) * costs["output"]
+    return total
+
 # Rate limiting: track API calls per user
 rate_limit_tracker = {}  # user_id -> list of timestamps
 RATE_LIMIT_MAX_CALLS = 30       # max API calls per window
@@ -115,10 +153,10 @@ def check_rate_limit(user_id):
 MEMORY_FILE = os.path.expanduser("~/telegram-claude-bot/.bot_memory.json")
 
 def save_memory():
-    """Save conversation history to disk for persistence across restarts"""
+    """Save conversation history and token usage to disk for persistence across restarts"""
     try:
         # Convert to serializable format, keeping last 20 messages per user
-        data = {}
+        convos = {}
         for uid, messages in conversation_history.items():
             serializable = []
             for msg in messages[-20:]:
@@ -138,21 +176,37 @@ def save_memory():
                             serializable.append({"role": msg["role"], "content": text})
                     except:
                         continue
-            data[str(uid)] = serializable
+            convos[str(uid)] = serializable
+
+        data = {
+            "conversations": convos,
+            "token_usage": token_usage,
+        }
         with open(MEMORY_FILE, 'w') as f:
             json.dump(data, f)
     except Exception as e:
         logging.error(f"Failed to save memory: {e}")
 
 def load_memory():
-    """Load conversation history from disk"""
-    global conversation_history
+    """Load conversation history and token usage from disk"""
+    global conversation_history, token_usage
     try:
         if os.path.exists(MEMORY_FILE):
             with open(MEMORY_FILE, 'r') as f:
                 data = json.load(f)
-            conversation_history = {int(k): v for k, v in data.items()}
-            logging.info(f"Loaded memory for {len(conversation_history)} users")
+            # Handle both old format (flat dict) and new format (nested)
+            if "conversations" in data:
+                conversation_history = {int(k): v for k, v in data["conversations"].items()}
+                saved_usage = data.get("token_usage", {})
+                if saved_usage:
+                    token_usage["total_input"] = saved_usage.get("total_input", 0)
+                    token_usage["total_output"] = saved_usage.get("total_output", 0)
+                    token_usage["session_messages"] = saved_usage.get("session_messages", 0)
+                    token_usage["by_model"] = saved_usage.get("by_model", {})
+            else:
+                # Old format: flat dict of conversations
+                conversation_history = {int(k): v for k, v in data.items()}
+            logging.info(f"Loaded memory for {len(conversation_history)} users, {token_usage['session_messages']} historical messages tracked")
     except Exception as e:
         logging.error(f"Failed to load memory: {e}")
         conversation_history = {}
@@ -652,8 +706,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
         logging.warning(f"⚠️ NO WHITELIST SET. User ID: {user_id} Username: @{user_name}")
         logging.warning(f"⚠️ Set ALLOWED_TELEGRAM_IDS={user_id} in your environment to secure the bot!")
 
+    # Natural language command shortcuts (works with voice too)
+    msg_lower = user_message.strip().lower()
+    shortcut_map = {
+        cmd_help: ["what commands", "what can you do", "what can i do", "help me", "show commands", "list commands", "show me commands"],
+        cmd_status: ["bot status", "are you alive", "are you running", "you alive", "you up", "status check", "how are you"],
+        cmd_cost: ["how much", "token usage", "what's the cost", "whats the cost", "how expensive", "cost so far", "what am i spending"],
+        cmd_clear: ["clear history", "fresh start", "reset conversation", "forget everything", "start over", "clear context", "wipe history"],
+        cmd_projects: ["list projects", "show projects", "my projects", "what projects"],
+        cmd_screenshot: ["take a screenshot", "show my screen", "what's on my screen", "whats on my screen", "screen capture", "screenshot please", "grab my screen", "show me my screen"],
+        cmd_health: ["system health", "how's my mac", "hows my mac", "mac health", "check my system", "system status"],
+    }
+    for handler, phrases in shortcut_map.items():
+        if any(phrase in msg_lower for phrase in phrases):
+            await handler(update, context)
+            return
+
     # Emergency kill code - nuclear shutdown
-    if user_message.strip().lower() == KILL_CODE:
+    if msg_lower == KILL_CODE.lower():
         log_activity("kill_code", user_id, "Emergency shutdown triggered")
         await update.message.reply_text("🛑 Emergency stop activated. Shutting everything down.")
         subprocess.run("pkill -9 -f ngrok", shell=True)
@@ -725,6 +795,8 @@ You are running as: {model_label} {"Haiku (fast)" if "haiku" in model else "Sonn
             messages=messages,
             tools=tools
         )
+
+        track_tokens(response, model)
 
         if response.stop_reason == "tool_use":
             tool_results = []
@@ -1060,6 +1132,185 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Photo save failed: {str(e)[:200]}")
 
 
+# === SLASH COMMANDS ===
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List all available commands"""
+    user_id = update.effective_user.id
+    if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
+        return
+    await update.message.reply_text(
+        "🤖 *Claude Bot Commands*\n\n"
+        "/help — Show this list\n"
+        "/status — Bot health, uptime, recent activity\n"
+        "/cost — Token usage and estimated cost this session\n"
+        "/clear — Reset conversation history\n"
+        "/projects — List all projects with git status\n"
+        "/screenshot — Capture your screen\n"
+        "/health — Mac system health (CPU, RAM, disk, battery)\n\n"
+        "You can also just type naturally — Claude handles the rest.\n"
+        "Send voice messages, photos, or files too.\n\n"
+        "Emergency kill: send `killclaudenow`",
+        parse_mode="Markdown"
+    )
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bot health check"""
+    user_id = update.effective_user.id
+    if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
+        return
+
+    uptime_seconds = int(time.time() - BOT_START_TIME)
+    hours, remainder = divmod(uptime_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    uptime_str = f"{hours}h {minutes}m {secs}s"
+
+    # Check recent activity
+    recent_activity = "No log found"
+    try:
+        result = subprocess.run(
+            "tail -5 /tmp/claudebot_activity.log",
+            shell=True, capture_output=True, text=True, timeout=5
+        )
+        if result.stdout.strip():
+            recent_activity = result.stdout.strip()
+    except:
+        pass
+
+    # Check PID
+    pid = os.getpid()
+
+    # Memory usage
+    mem_info = ""
+    try:
+        result = subprocess.run(
+            f"ps -o rss= -p {pid}",
+            shell=True, capture_output=True, text=True, timeout=5
+        )
+        mem_kb = int(result.stdout.strip())
+        mem_info = f"Memory: {mem_kb // 1024}MB"
+    except:
+        mem_info = "Memory: unknown"
+
+    msg_count = token_usage["session_messages"]
+    cost = estimate_cost()
+    conv_count = len(conversation_history)
+
+    await update.message.reply_text(
+        f"🟢 *Bot Status*\n\n"
+        f"Uptime: {uptime_str}\n"
+        f"PID: {pid}\n"
+        f"{mem_info}\n"
+        f"Messages this session: {msg_count}\n"
+        f"Est. cost this session: ${cost:.4f}\n"
+        f"Active conversations: {conv_count}\n\n"
+        f"📋 *Recent Activity:*\n`{recent_activity[-500:]}`",
+        parse_mode="Markdown"
+    )
+
+async def cmd_cost(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show token usage and estimated cost"""
+    user_id = update.effective_user.id
+    if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
+        return
+
+    total_cost = estimate_cost()
+    lines = [f"💰 *Token Usage This Session*\n"]
+    lines.append(f"Total input: {token_usage['total_input']:,} tokens")
+    lines.append(f"Total output: {token_usage['total_output']:,} tokens")
+    lines.append(f"Messages: {token_usage['session_messages']}")
+    lines.append(f"Estimated cost: ${total_cost:.4f}\n")
+
+    if token_usage["by_model"]:
+        lines.append("*By model:*")
+        for model, usage in token_usage["by_model"].items():
+            label = "⚡ Haiku" if "haiku" in model else "🧠 Sonnet"
+            model_cost = 0.0
+            costs = TOKEN_COSTS.get(model, {"input": 3.00, "output": 15.00})
+            model_cost += (usage["input"] / 1_000_000) * costs["input"]
+            model_cost += (usage["output"] / 1_000_000) * costs["output"]
+            lines.append(f"  {label}: {usage['calls']} calls, {usage['input']:,}+{usage['output']:,} tokens (${model_cost:.4f})")
+
+    # Rough projection
+    uptime_hours = (time.time() - BOT_START_TIME) / 3600
+    if uptime_hours > 0.1 and total_cost > 0:
+        daily_rate = (total_cost / uptime_hours) * 24
+        lines.append(f"\n📊 At this pace: ~${daily_rate:.2f}/day, ~${daily_rate * 30:.2f}/month")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reset conversation history"""
+    user_id = update.effective_user.id
+    if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
+        return
+
+    if user_id in conversation_history:
+        msg_count = len(conversation_history[user_id])
+        del conversation_history[user_id]
+        save_memory()
+        await update.message.reply_text(f"🧹 Cleared {msg_count} messages from your conversation. Fresh start!")
+    else:
+        await update.message.reply_text("Already clear — no conversation history.")
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Welcome message for new users"""
+    user_id = update.effective_user.id
+    user_name = update.effective_user.first_name or "there"
+
+    if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
+        await update.message.reply_text(
+            f"🚫 Unauthorized. Your Telegram ID: {user_id}\n"
+            f"Add this to ALLOWED_TELEGRAM_IDS to authorize."
+        )
+        return
+
+    await update.message.reply_text(
+        f"Hey {user_name}! 🤖\n\n"
+        f"I'm your remote coding agent. I can control your Mac, "
+        f"write code, run commands, serve apps, take screenshots, and more — "
+        f"all from right here in Telegram.\n\n"
+        f"Just type what you need in plain English, or send a voice message.\n\n"
+        f"Type /help to see all commands."
+    )
+
+async def cmd_projects(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Quick shortcut to list projects"""
+    user_id = update.effective_user.id
+    if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
+        return
+    result = execute_tool("list_projects", {})
+    await send_long_message(update, f"📁 *Projects:*\n\n{result}")
+
+async def cmd_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Quick shortcut to take a screenshot"""
+    user_id = update.effective_user.id
+    if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
+        return
+    result = execute_tool("screenshot", {"display": "all"})
+    if result and result.startswith("SCREENSHOT_SAVED:"):
+        paths = result.split(":", 1)[1].split("|")
+        for i, spath in enumerate(paths):
+            if os.path.exists(spath):
+                caption = f"📸 Display {i+1}" if len(paths) > 1 else "📸 Screenshot"
+                with open(spath, 'rb') as photo:
+                    await context.bot.send_photo(
+                        chat_id=update.effective_chat.id,
+                        photo=photo,
+                        caption=caption
+                    )
+    else:
+        await update.message.reply_text(f"⚠️ Screenshot failed: {result}")
+
+async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Quick shortcut to system health"""
+    user_id = update.effective_user.id
+    if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
+        return
+    result = execute_tool("system_health", {})
+    await send_long_message(update, result)
+
+
 def main():
     check_single_instance()
     load_memory()
@@ -1070,6 +1321,17 @@ def main():
         logging.warning("⚠️  Message the bot to see your user ID, then set the env var.")
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    # Slash commands (registered before the catch-all text handler)
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("cost", cmd_cost))
+    app.add_handler(CommandHandler("clear", cmd_clear))
+    app.add_handler(CommandHandler("projects", cmd_projects))
+    app.add_handler(CommandHandler("screenshot", cmd_screenshot))
+    app.add_handler(CommandHandler("health", cmd_health))
+
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
