@@ -5,9 +5,10 @@ import time
 import tempfile
 import base64
 
-PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/com.johnjurkoii.claudebot.plist")
+MENUBAR_PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/com.johnjurkoii.claudemenubar.plist")
 BOT_PATH = "/Users/johnjurkoii/telegram-claude-bot/bot.py"
-NGROK_PATH = "/opt/homebrew/bin/ngrok"
+BOT_DIR = "/Users/johnjurkoii/telegram-claude-bot"
+MENUBAR_PATH = "/Users/johnjurkoii/telegram-claude-bot/menubar.py"
 
 # Base64-encoded 44x44 PNG template icon (terminal prompt silhouette)
 ICON_B64 = "iVBORw0KGgoAAAANSUhEUgAAACwAAAAsCAYAAAAehFoBAAABIElEQVR4nO2Y3Q7DIAiFZdn7v7K7qZ2zQ46AWlPPxTJTfr4xwKQU+ihm38kz8Msz2KEonE3yBubg3KB7VLirHg/MDZjb4PWocAl3+y3RVRu4t1r6y/UCYCTyoBUeAQvlQYBHwUL5JODRsGLeGvAs2Gr+5bbEcsDlGpndBjVRCL8VvjNsCAff2xwlfn8nEb/3UTtJuWdThXOAS9AMCLUDReYKU5Y1VuhQO0mqLZHyUVGidE7PUbsWLbfWngGc/uGyF9M5PUftWuSx1qBGtAxaLvNNN3AP0/nB5dBEddaFb7mhc72aUVmuZlOFtXNkmT81sHXotf7L9bAa2NKHFv8asBhRmxT0+2uEeM7YxywX0hKur0ut+dAeHgU9ujhbW1uSPlK9YkSi1oxJAAAAAElFTkSuQmCC"
@@ -20,16 +21,17 @@ def get_icon_path():
             f.write(base64.b64decode(ICON_B64))
     return icon_path
 
-PLIST_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
+# LaunchAgent plist for the MENUBAR app (which auto-starts the bot)
+MENUBAR_PLIST_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.johnjurkoii.claudebot</string>
+    <string>com.johnjurkoii.claudemenubar</string>
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/python3</string>
-        <string>{bot_path}</string>
+        <string>{menubar_path}</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -41,9 +43,12 @@ PLIST_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
         <string>{telegram_token}</string>
         <key>ANTHROPIC_API_KEY</key>
         <string>{anthropic_key}</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
     </dict>
 </dict>
 </plist>"""
+
 
 class ClaudeBotApp(rumps.App):
     def __init__(self):
@@ -58,6 +63,9 @@ class ClaudeBotApp(rumps.App):
             rumps.MenuItem("Launch at Login: Checking...", callback=self.toggle_launch_at_login),
             None,
         ]
+        # Auto-start bot if not already running
+        if not self.is_bot_running():
+            self.start_bot(None)
         self.update_status()
 
     def is_bot_running(self):
@@ -72,23 +80,12 @@ class ClaudeBotApp(rumps.App):
                 pass
         return False
 
-    def is_ngrok_running(self):
-        result = subprocess.run(
-            ["pgrep", "-f", "ngrok"],
-            capture_output=True,
-            text=True
-        )
-        return result.returncode == 0
-
     def is_launch_at_login_enabled(self):
-        return os.path.exists(PLIST_PATH)
+        return os.path.exists(MENUBAR_PLIST_PATH)
 
     def update_status(self):
         running = self.is_bot_running()
-        ngrok = self.is_ngrok_running()
         status = "🟢 Running" if running else "🔴 Stopped"
-        if running and ngrok:
-            status = "🟢 Running + ngrok"
         self.menu["Status: Checking..."].title = f"Status: {status}"
         launch = self.is_launch_at_login_enabled()
         self.menu["Launch at Login: Checking..."].title = f"Launch at Login: {'✅ On' if launch else '❌ Off'}"
@@ -109,25 +106,16 @@ class ClaudeBotApp(rumps.App):
         return env
 
     def start_bot(self, _):
-        env = self.load_env()
-
         if not self.is_bot_running():
+            env = self.load_env()
             subprocess.Popen(
                 ["python3", BOT_PATH],
                 env=env,
-                cwd="/Users/johnjurkoii/telegram-claude-bot",
+                cwd=BOT_DIR,
                 stdout=open("/tmp/claudebot.log", "w"),
                 stderr=open("/tmp/claudebot.err", "w")
             )
-
-        if not self.is_ngrok_running():
-            subprocess.Popen(
-                [NGROK_PATH, "http", "8080"],
-                stdout=open("/tmp/ngrok.log", "w"),
-                stderr=open("/tmp/ngrok.err", "w")
-            )
-
-        rumps.notification("Claude Bot", "Started", "🤖 Bot + ngrok are running!")
+            rumps.notification("Claude Bot", "Started", "🤖 Bot is running!")
         self.update_status()
 
     def stop_bot(self, _):
@@ -148,37 +136,53 @@ class ClaudeBotApp(rumps.App):
                 pass
         # Fallback: pkill
         subprocess.run(["pkill", "-f", "telegram-claude-bot/bot.py"], capture_output=True)
-        subprocess.run(["pkill", "-f", "ngrok"], capture_output=True)
+        # Kill any dev servers the bot started
         subprocess.run("lsof -ti:8080 | xargs kill -9 2>/dev/null", shell=True, capture_output=True)
-        rumps.notification("Claude Bot", "Stopped", "🤖 Bot + ngrok stopped.")
+        rumps.notification("Claude Bot", "Stopped", "🤖 Bot stopped.")
         time.sleep(1)
         self.update_status()
 
     def toggle_launch_at_login(self, _):
         if self.is_launch_at_login_enabled():
-            # Unload the plist (stops auto-launch) but don't kill the running bot
-            subprocess.run(["launchctl", "unload", PLIST_PATH], capture_output=True)
+            # Unload and remove the menubar LaunchAgent
+            subprocess.run(["launchctl", "unload", MENUBAR_PLIST_PATH], capture_output=True)
             try:
-                os.remove(PLIST_PATH)
+                os.remove(MENUBAR_PLIST_PATH)
             except:
                 pass
+            # Also clean up old bot-only plist if it exists
+            old_plist = os.path.expanduser("~/Library/LaunchAgents/com.johnjurkoii.claudebot.plist")
+            if os.path.exists(old_plist):
+                subprocess.run(["launchctl", "unload", old_plist], capture_output=True)
+                try:
+                    os.remove(old_plist)
+                except:
+                    pass
             rumps.notification("Claude Bot", "Launch at Login Disabled",
-                             "Bot won't auto-start on login. Currently running bot is unaffected.")
+                             "Menu bar app won't auto-start on login.")
         else:
             env = self.load_env()
             telegram_token = env.get("TELEGRAM_TOKEN", "")
             anthropic_key = env.get("ANTHROPIC_API_KEY", "")
-            plist = PLIST_CONTENT.format(
-                bot_path=BOT_PATH,
+            plist = MENUBAR_PLIST_CONTENT.format(
+                menubar_path=MENUBAR_PATH,
                 telegram_token=telegram_token,
                 anthropic_key=anthropic_key
             )
-            os.makedirs(os.path.dirname(PLIST_PATH), exist_ok=True)
-            with open(PLIST_PATH, 'w') as f:
+            os.makedirs(os.path.dirname(MENUBAR_PLIST_PATH), exist_ok=True)
+            with open(MENUBAR_PLIST_PATH, 'w') as f:
                 f.write(plist)
-            subprocess.run(["launchctl", "load", PLIST_PATH], capture_output=True)
+            subprocess.run(["launchctl", "load", MENUBAR_PLIST_PATH], capture_output=True)
+            # Clean up old bot-only plist if it exists
+            old_plist = os.path.expanduser("~/Library/LaunchAgents/com.johnjurkoii.claudebot.plist")
+            if os.path.exists(old_plist):
+                subprocess.run(["launchctl", "unload", old_plist], capture_output=True)
+                try:
+                    os.remove(old_plist)
+                except:
+                    pass
             rumps.notification("Claude Bot", "Launch at Login Enabled",
-                             "Bot will start automatically on login.")
+                             "Menu bar app + bot will start automatically on login.")
         self.update_status()
 
     @rumps.timer(10)

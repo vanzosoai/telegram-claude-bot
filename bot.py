@@ -270,6 +270,18 @@ tools = [
             "properties": {},
             "required": []
         }
+    },
+    {
+        "name": "serve_project",
+        "description": "Serve a project folder via local HTTP server and ngrok tunnel. Returns a public URL the user can open on their phone. Use this INSTEAD of manually starting servers and ngrok.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Full path to the folder to serve (e.g. /Users/johnjurkoii/Projects/todo-app)"},
+                "port": {"type": "integer", "description": "Port to serve on (default 8080)"}
+            },
+            "required": ["path"]
+        }
     }
 ]
 
@@ -503,6 +515,86 @@ def execute_tool(tool_name, tool_input, chat_id=None):
             parts.append(f"⏱️ {uptime}")
             return "\n".join(parts)
 
+        elif tool_name == "serve_project":
+            path = tool_input["path"]
+            port = tool_input.get("port", 8080)
+            if not is_safe_path(path):
+                return f"🚫 Access denied. Can only serve from: {', '.join(ALLOWED_PATHS)}"
+            if not os.path.isdir(path):
+                return f"🚫 Not a directory: {path}"
+
+            import json as _json
+
+            # Step 1: Clean slate — kill old server AND old ngrok
+            subprocess.run(f"lsof -ti:{port} | xargs kill -9 2>/dev/null", shell=True, timeout=5)
+            subprocess.run("pkill -9 -f ngrok 2>/dev/null", shell=True, timeout=5)
+            time.sleep(1)
+
+            # Step 2: Start HTTP server and verify it's listening
+            subprocess.Popen(
+                f"cd '{path}' && python3 -m http.server {port}",
+                shell=True,
+                stdout=open("/tmp/http_server.log", "w"),
+                stderr=subprocess.STDOUT
+            )
+            # Verify server is up (retry up to 5 times)
+            server_up = False
+            for _ in range(5):
+                time.sleep(0.5)
+                check = subprocess.run(
+                    f"curl -s -o /dev/null -w '%{{http_code}}' http://127.0.0.1:{port}/",
+                    shell=True, capture_output=True, text=True, timeout=3
+                )
+                if check.stdout.strip().startswith(("200", "301", "404")):
+                    server_up = True
+                    break
+            if not server_up:
+                return f"⚠️ HTTP server failed to start on port {port}. Check /tmp/http_server.log"
+
+            # Step 3: Start fresh ngrok tunnel
+            subprocess.Popen(
+                f"ngrok http {port} --log=stdout > /tmp/ngrok.log 2>&1",
+                shell=True
+            )
+
+            # Step 4: Wait for ngrok to register tunnel (retry with backoff)
+            url = None
+            for attempt in range(8):
+                time.sleep(1.5 if attempt < 3 else 2.5)
+                try:
+                    result = subprocess.run(
+                        "curl -s http://127.0.0.1:4040/api/tunnels",
+                        shell=True, capture_output=True, text=True, timeout=5
+                    )
+                    if result.returncode != 0 or not result.stdout.strip():
+                        continue
+                    data = _json.loads(result.stdout)
+                    tunnels = data.get("tunnels", [])
+                    if tunnels:
+                        # Prefer https
+                        url = tunnels[0]["public_url"]
+                        for t in tunnels:
+                            if t["public_url"].startswith("https"):
+                                url = t["public_url"]
+                                break
+                        break
+                except (_json.JSONDecodeError, KeyError, Exception):
+                    continue
+
+            if url:
+                return f"🌐 App is live!\n{url}\n\nServing: {path}\nPort: {port}"
+            else:
+                # Check ngrok log for errors
+                ngrok_err = ""
+                try:
+                    with open("/tmp/ngrok.log", "r") as f:
+                        log_content = f.read()[-500:]
+                    if "ERR" in log_content:
+                        ngrok_err = f"\nNgrok log: {log_content[-200:]}"
+                except:
+                    pass
+                return f"⚠️ Server running on localhost:{port} but ngrok tunnel failed to initialize.{ngrok_err}\nTry: ngrok config check"
+
     except subprocess.TimeoutExpired:
         return "⚠️ Command timed out (60s limit)"
     except Exception as e:
@@ -532,10 +624,10 @@ def classify_complexity(message):
     msg_lower = message.lower()
     # Long messages or messages with complex signals -> Sonnet
     if len(message) > 200:
-        return "claude-sonnet-4-5-20250514"
+        return "claude-sonnet-4-6"
     for signal in complex_signals:
         if signal in msg_lower:
-            return "claude-sonnet-4-5-20250514"
+            return "claude-sonnet-4-6"
     return "claude-haiku-4-5-20251001"
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, text_override=None):
@@ -567,8 +659,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
         subprocess.run("pkill -9 -f ngrok", shell=True)
         subprocess.run("lsof -ti:8080 | xargs kill -9", shell=True)
         subprocess.run("pkill -9 -f menubar.py", shell=True)
-        subprocess.run("launchctl unload ~/Library/LaunchAgents/com.johnjurkoii.claudebot.plist", shell=True)
-        subprocess.run("launchctl unload ~/Library/LaunchAgents/com.johnjurkoii.menubar.plist", shell=True)
+        subprocess.run("launchctl unload ~/Library/LaunchAgents/com.johnjurkoii.claudebot.plist 2>/dev/null", shell=True)
+        subprocess.run("launchctl unload ~/Library/LaunchAgents/com.johnjurkoii.claudemenubar.plist 2>/dev/null", shell=True)
         os._exit(0)
 
     # Rate limiting
@@ -620,14 +712,10 @@ You can ONLY work within these folders:
 
 Never touch system files, never use sudo, never modify anything outside these folders.
 
-To show an app:
-1. lsof -ti:8080 | xargs kill -9
-2. nohup python3 -m http.server 8080 & (in project folder)
-3. ngrok is already running as a background service, do NOT start it again
-4. curl -s http://127.0.0.1:4040/api/tunnels to get the public URL
-5. Return the public_url to user
+To show an app to the user via a public URL:
+Use the serve_project tool with the project folder path. It handles everything (kills old servers, starts new one, starts ngrok if needed, returns the public URL) in one step. DO NOT manually start servers or ngrok — always use serve_project.
 
-Stop server: lsof -ti:8080 | xargs kill -9
+Stop server: lsof -ti:8080 | xargs kill -9 2>/dev/null
 
 You have a list_projects tool to show all projects in ~/Projects with git status.
 You have a screenshot tool to capture the screen.
