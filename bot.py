@@ -205,6 +205,26 @@ tools = [
             },
             "required": ["command"]
         }
+    },
+    {
+        "name": "send_file",
+        "description": "Send a file from the Mac to the user via Telegram. Use for any file the user requests (code, images, documents, etc).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Full path to the file to send"}
+            },
+            "required": ["path"]
+        }
+    },
+    {
+        "name": "system_health",
+        "description": "Get Mac system health: CPU usage, memory, disk space, top processes, and battery status.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
     }
 ]
 
@@ -340,6 +360,71 @@ def execute_tool(tool_name, tool_input, chat_id=None):
                 }
             log_activity("background_started", detail=f"PID {proc.pid}: {label}")
             return f"⏳ Running in background (PID {proc.pid}): {label}\nYou'll get a notification when it finishes.\nLog: {log_file}"
+
+        elif tool_name == "send_file":
+            path = tool_input["path"]
+            if not is_safe_path(path):
+                return f"🚫 Access denied. Can only send from: {', '.join(ALLOWED_PATHS)}"
+            if not os.path.exists(path):
+                return f"File not found: {path}"
+            file_size = os.path.getsize(path)
+            if file_size > 50 * 1024 * 1024:  # 50MB Telegram limit
+                return f"File too large ({file_size // (1024*1024)}MB). Telegram limit is 50MB."
+            return f"SEND_FILE:{path}"
+
+        elif tool_name == "system_health":
+            parts = []
+            # CPU and load
+            load = subprocess.run(["sysctl", "-n", "vm.loadavg"],
+                                capture_output=True, text=True, timeout=5).stdout.strip()
+            parts.append(f"📊 Load: {load}")
+            # Memory
+            mem = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5).stdout
+            # Parse vm_stat for useful info
+            page_size = 16384  # default macOS
+            free = 0
+            active = 0
+            for line in mem.split('\n'):
+                if 'free' in line.lower():
+                    try: free = int(line.split(':')[1].strip().rstrip('.')) * page_size
+                    except: pass
+                if 'active' in line.lower() and 'inactive' not in line.lower():
+                    try: active = int(line.split(':')[1].strip().rstrip('.')) * page_size
+                    except: pass
+            parts.append(f"🧠 Memory: {active//(1024**3)}GB active, {free//(1024**3)}GB free")
+            # Disk
+            disk = subprocess.run(["df", "-h", "/"],
+                                capture_output=True, text=True, timeout=5).stdout
+            disk_lines = disk.strip().split('\n')
+            if len(disk_lines) > 1:
+                parts.append(f"💾 Disk: {disk_lines[1].split()[3]} free of {disk_lines[1].split()[1]}")
+            # Battery
+            batt = subprocess.run(["pmset", "-g", "batt"],
+                                capture_output=True, text=True, timeout=5).stdout
+            if "%" in batt:
+                parts.append(f"🔋 {batt.split(chr(10))[1].strip()[:60]}")
+            # Top 5 processes by CPU
+            top = subprocess.run(
+                ["ps", "aux", "--sort=-%cpu"],
+                capture_output=True, text=True, timeout=5
+            )
+            if top.returncode != 0:
+                # macOS ps doesn't support --sort, use different approach
+                top = subprocess.run(
+                    "ps aux | sort -nrk 3 | head -6",
+                    shell=True, capture_output=True, text=True, timeout=5
+                )
+            top_lines = top.stdout.strip().split('\n')[1:6]  # skip header
+            if top_lines:
+                parts.append("🔥 Top processes:")
+                for line in top_lines:
+                    cols = line.split()
+                    if len(cols) >= 11:
+                        parts.append(f"  {cols[10][:25]} — CPU: {cols[2]}% MEM: {cols[3]}%")
+            # Uptime
+            uptime = subprocess.run(["uptime"], capture_output=True, text=True, timeout=5).stdout.strip()
+            parts.append(f"⏱️ {uptime}")
+            return "\n".join(parts)
 
     except subprocess.TimeoutExpired:
         return "⚠️ Command timed out (60s limit)"
@@ -502,6 +587,21 @@ You are running as: {model_label} {"Haiku (fast)" if "haiku" in model else "Sonn
                         except Exception as e:
                             result = f"Screenshot taken but failed to send: {e}"
 
+                    # Handle file send - send file to user in Telegram
+                    elif result and result.startswith("SEND_FILE:"):
+                        file_path = result.split(":", 1)[1]
+                        try:
+                            with open(file_path, 'rb') as f:
+                                await context.bot.send_document(
+                                    chat_id=update.effective_chat.id,
+                                    document=f,
+                                    filename=os.path.basename(file_path),
+                                    caption=f"📤 {os.path.basename(file_path)}"
+                                )
+                            result = f"File sent: {os.path.basename(file_path)}"
+                        except Exception as e:
+                            result = f"File found but failed to send: {e}"
+
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
@@ -635,6 +735,160 @@ async def check_builds(context):
         del build_watchers[pid]
 
 
+# === VOICE MESSAGE HANDLER ===
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Transcribe voice messages and process as text commands"""
+    user_id = update.effective_user.id
+    user_name = update.effective_user.username or "unknown"
+
+    log_activity("voice_received", user_id, f"@{user_name}")
+
+    # Whitelist check
+    if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
+        await update.message.reply_text(f"🚫 Unauthorized. Your ID: {user_id}")
+        return
+
+    await update.message.reply_text("🎤 Transcribing...")
+
+    try:
+        # Download the voice file
+        voice = update.message.voice or update.message.audio
+        voice_file = await context.bot.get_file(voice.file_id)
+        ogg_path = f"/tmp/voice_{user_id}_{int(time.time())}.ogg"
+        wav_path = ogg_path.replace('.ogg', '.wav')
+        await voice_file.download_to_drive(ogg_path)
+
+        # Convert to wav using ffmpeg (macOS has it via homebrew or we use afconvert)
+        convert_result = subprocess.run(
+            ["ffmpeg", "-i", ogg_path, "-y", wav_path],
+            capture_output=True, text=True, timeout=15
+        )
+        if convert_result.returncode != 0:
+            # Try macOS native converter as fallback
+            subprocess.run(
+                ["afconvert", "-f", "WAVE", "-d", "LEI16", ogg_path, wav_path],
+                capture_output=True, text=True, timeout=15
+            )
+
+        # Transcribe using macOS built-in speech recognition or whisper
+        # First try whisper if installed
+        transcript = None
+        whisper_result = subprocess.run(
+            ["which", "whisper"], capture_output=True, text=True
+        )
+        if whisper_result.returncode == 0:
+            result = subprocess.run(
+                ["whisper", wav_path, "--model", "base", "--output_format", "txt", "--output_dir", "/tmp"],
+                capture_output=True, text=True, timeout=60
+            )
+            txt_path = wav_path.replace('.wav', '.txt')
+            if os.path.exists(txt_path):
+                with open(txt_path) as f:
+                    transcript = f.read().strip()
+
+        # Fallback: use Anthropic to describe what to do based on audio duration
+        if not transcript:
+            # Use macOS say -v ? to check, or just tell user we need whisper
+            # Try python whisper package
+            try:
+                import whisper as whisper_pkg
+                model = whisper_pkg.load_model("base")
+                result = model.transcribe(wav_path)
+                transcript = result["text"].strip()
+            except ImportError:
+                pass
+
+        if not transcript:
+            await update.message.reply_text(
+                "⚠️ Couldn't transcribe. Install whisper:\n"
+                "`pip3 install openai-whisper`\n"
+                "Then restart the bot."
+            )
+            return
+
+        await update.message.reply_text(f"🎤 Heard: \"{transcript}\"")
+        log_activity("voice_transcribed", user_id, transcript)
+
+        # Process as a normal text message
+        update.message.text = transcript
+        await handle_message(update, context)
+
+    except Exception as e:
+        logging.error(f"Voice handling error: {e}")
+        await update.message.reply_text(f"⚠️ Voice error: {str(e)[:200]}")
+    finally:
+        # Cleanup temp files
+        for f in [ogg_path, wav_path]:
+            try:
+                os.remove(f)
+            except:
+                pass
+
+
+# === FILE TRANSFER HANDLER ===
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive files from phone and save to Mac"""
+    user_id = update.effective_user.id
+
+    # Whitelist check
+    if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
+        await update.message.reply_text(f"🚫 Unauthorized. Your ID: {user_id}")
+        return
+
+    doc = update.message.document
+    if not doc:
+        return
+
+    file_name = doc.file_name or f"upload_{int(time.time())}"
+    log_activity("file_received", user_id, f"{file_name} ({doc.file_size} bytes)")
+
+    # Save to ~/Desktop/BotUploads by default
+    upload_dir = os.path.expanduser("~/Desktop/BotUploads")
+    os.makedirs(upload_dir, exist_ok=True)
+    save_path = os.path.join(upload_dir, file_name)
+
+    try:
+        tg_file = await context.bot.get_file(doc.file_id)
+        await tg_file.download_to_drive(save_path)
+        await update.message.reply_text(f"📥 Saved to {save_path}")
+        log_activity("file_saved", user_id, save_path)
+
+        # If there's a caption, treat it as an instruction about the file
+        if update.message.caption:
+            update.message.text = f"I just uploaded a file to {save_path}. {update.message.caption}"
+            await handle_message(update, context)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Upload failed: {str(e)[:200]}")
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive photos from phone and save to Mac"""
+    user_id = update.effective_user.id
+
+    if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
+        await update.message.reply_text(f"🚫 Unauthorized. Your ID: {user_id}")
+        return
+
+    photo = update.message.photo[-1]  # Largest size
+    file_name = f"photo_{int(time.time())}.jpg"
+
+    upload_dir = os.path.expanduser("~/Desktop/BotUploads")
+    os.makedirs(upload_dir, exist_ok=True)
+    save_path = os.path.join(upload_dir, file_name)
+
+    try:
+        tg_file = await context.bot.get_file(photo.file_id)
+        await tg_file.download_to_drive(save_path)
+        await update.message.reply_text(f"📸 Photo saved to {save_path}")
+        log_activity("photo_saved", user_id, save_path)
+
+        if update.message.caption:
+            update.message.text = f"I just uploaded a photo to {save_path}. {update.message.caption}"
+            await handle_message(update, context)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Photo save failed: {str(e)[:200]}")
+
+
 def main():
     load_memory()
     log_activity("bot_started", detail=f"whitelist={ALLOWED_USER_IDS or 'NONE - UNSECURED'}")
@@ -645,6 +899,9 @@ def main():
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     # Schedule jobs (requires pip install "python-telegram-bot[job-queue]")
     job_queue = app.job_queue
