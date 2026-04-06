@@ -187,10 +187,12 @@ tools = [
     },
     {
         "name": "screenshot",
-        "description": "Take a screenshot of the Mac screen. Returns the path to the saved screenshot image.",
+        "description": "Take a screenshot of the Mac. User has 2 displays. By default captures both. Returns the image(s) to Telegram.",
         "input_schema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "display": {"type": "string", "description": "Which display: 'all' (default, both displays), '1' (main), or '2' (secondary)", "default": "all"}
+            },
             "required": []
         }
     },
@@ -317,15 +319,37 @@ def execute_tool(tool_name, tool_input, chat_id=None):
             return "\n".join(entries) if entries else "No projects found in ~/Projects"
 
         elif tool_name == "screenshot":
-            screenshot_raw = "/tmp/bot_screenshot_raw.png"
+            display = tool_input.get("display", "all")
+            screenshot_raw_1 = "/tmp/bot_screenshot_1.png"
+            screenshot_raw_2 = "/tmp/bot_screenshot_2.png"
             screenshot_path = "/tmp/bot_screenshot.jpg"
-            # Capture screenshot
-            result = subprocess.run(
-                ["screencapture", "-x", screenshot_raw],
-                capture_output=True, text=True, timeout=10
-            )
-            if result.returncode != 0 or not os.path.exists(screenshot_raw):
-                return f"Failed to take screenshot: {result.stderr}"
+
+            if display == "all" or display == "both":
+                # Capture both displays as separate files
+                result = subprocess.run(
+                    ["screencapture", "-x", screenshot_raw_1, screenshot_raw_2],
+                    capture_output=True, text=True, timeout=10
+                )
+                # Use whichever has the most content (largest file = main display)
+                screenshots = []
+                for f in [screenshot_raw_1, screenshot_raw_2]:
+                    if os.path.exists(f):
+                        screenshots.append(f)
+                if not screenshots:
+                    return f"Failed to take screenshot: {result.stderr}"
+                # Send the largest one (most likely the active display)
+                screenshots.sort(key=lambda f: os.path.getsize(f), reverse=True)
+                screenshot_raw = screenshots[0]
+            else:
+                # Single display capture
+                screenshot_raw = screenshot_raw_1
+                result = subprocess.run(
+                    ["screencapture", "-x", screenshot_raw],
+                    capture_output=True, text=True, timeout=10
+                )
+                if result.returncode != 0 or not os.path.exists(screenshot_raw):
+                    return f"Failed to take screenshot: {result.stderr}"
+
             # Resize to max 1920px wide and compress as JPEG for Telegram
             subprocess.run(
                 ["sips", "--resampleWidth", "1920", "--setProperty", "format", "jpeg",
@@ -333,6 +357,16 @@ def execute_tool(tool_name, tool_input, chat_id=None):
                 capture_output=True, text=True, timeout=10
             )
             if os.path.exists(screenshot_path):
+                # If we got both displays, send both
+                if display in ["all", "both"] and len(screenshots) > 1:
+                    second_jpg = "/tmp/bot_screenshot_2.jpg"
+                    subprocess.run(
+                        ["sips", "--resampleWidth", "1920", "--setProperty", "format", "jpeg",
+                         "--setProperty", "formatOptions", "60", screenshots[1], "--out", second_jpg],
+                        capture_output=True, text=True, timeout=10
+                    )
+                    if os.path.exists(second_jpg):
+                        return f"SCREENSHOT_SAVED:{screenshot_path}|{second_jpg}"
                 return f"SCREENSHOT_SAVED:{screenshot_path}"
             return f"SCREENSHOT_SAVED:{screenshot_raw}"
 
@@ -573,17 +607,20 @@ You are running as: {model_label} {"Haiku (fast)" if "haiku" in model else "Sonn
                     status_message += f"⚙️ `{label}`\n"
                     result = execute_tool(tool_name, tool_input, chat_id=update.effective_chat.id)
 
-                    # Handle screenshot - send as photo in Telegram
+                    # Handle screenshot - send as photo(s) in Telegram
                     if result and result.startswith("SCREENSHOT_SAVED:"):
-                        screenshot_path = result.split(":", 1)[1]
+                        paths = result.split(":", 1)[1].split("|")
                         try:
-                            with open(screenshot_path, 'rb') as photo:
-                                await context.bot.send_photo(
-                                    chat_id=update.effective_chat.id,
-                                    photo=photo,
-                                    caption="📸 Screenshot"
-                                )
-                            result = "Screenshot sent to chat successfully."
+                            for i, spath in enumerate(paths):
+                                if os.path.exists(spath):
+                                    caption = f"📸 Display {i+1}" if len(paths) > 1 else "📸 Screenshot"
+                                    with open(spath, 'rb') as photo:
+                                        await context.bot.send_photo(
+                                            chat_id=update.effective_chat.id,
+                                            photo=photo,
+                                            caption=caption
+                                        )
+                            result = f"Screenshot(s) sent ({len(paths)} display{'s' if len(paths)>1 else ''})."
                         except Exception as e:
                             result = f"Screenshot taken but failed to send: {e}"
 
