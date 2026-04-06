@@ -815,7 +815,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         if whisper_result.returncode == 0:
             result = subprocess.run(
-                ["whisper", wav_path, "--model", "base", "--output_format", "txt", "--output_dir", "/tmp"],
+                ["whisper", wav_path, "--model", "tiny", "--output_format", "txt", "--output_dir", "/tmp"],
                 capture_output=True, text=True, timeout=60
             )
             txt_path = wav_path.replace('.wav', '.txt')
@@ -829,7 +829,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Try python whisper package
             try:
                 import whisper as whisper_pkg
-                model = whisper_pkg.load_model("base")
+                model = whisper_pkg.load_model("tiny")
                 result = model.transcribe(wav_path)
                 transcript = result["text"].strip()
             except ImportError:
