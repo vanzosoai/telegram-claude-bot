@@ -13,10 +13,27 @@
 ## POWER
 - [x] 7. Add a list_projects command that shows all projects in ~/Projects
 - [x] 8. Screenshot tool so bot can take a screenshot of the Mac and send it as an image in Telegram
+- [x] 9. Background task runner with proactive notifications when builds finish
+- [x] 10. Voice messages - transcribe voice and execute as commands
+- [x] 11. File transfer - send files both ways (phone <-> Mac)
+- [x] 12. System health - CPU, memory, disk, battery, top processes
 
 ## FUN & USEFUL
-- [x] 10. Daily standup - bot messages me every morning with summary of active projects
-- [x] 11. Proactive notifications when a build finishes or something breaks
+- [x] 13. Daily standup - bot messages me every morning with summary of active projects
+- [x] 14. Proactive notifications when a build finishes or something breaks
 
 ## MENU BAR
-- [x] 13. Replace robot emoji with a proper native menu bar icon silhouette
+- [x] 15. Replace robot emoji with a proper native menu bar icon silhouette
+- [x] 16. Fix stop button (decouple from launch-at-login)
+
+## SETUP NEEDED
+- Voice messages require: `pip3 install openai-whisper`
+- Daily standup requires: `pip3 install "python-telegram-bot[job-queue]"`
+- Daily standup requires env vars: STANDUP_CHAT_ID=8687978775, STANDUP_HOUR=9
+
+## FUTURE IDEAS
+- One-line installer script for new users
+- Email integration
+- Dropbox/Google Drive integration
+- Auto-commit watcher (nudge when uncommitted changes sit too long)
+- Clipboard bridge (sync clipboard between phone and Mac)
