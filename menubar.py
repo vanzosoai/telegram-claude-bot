@@ -61,12 +61,16 @@ class ClaudeBotApp(rumps.App):
         self.update_status()
 
     def is_bot_running(self):
-        result = subprocess.run(
-            ["pgrep", "-f", "telegram-claude-bot/bot.py"],
-            capture_output=True,
-            text=True
-        )
-        return result.returncode == 0
+        pid_file = "/tmp/claudebot.pid"
+        if os.path.exists(pid_file):
+            try:
+                with open(pid_file, 'r') as f:
+                    pid = int(f.read().strip())
+                os.kill(pid, 0)  # Check if process exists
+                return True
+            except (OSError, ValueError):
+                pass
+        return False
 
     def is_ngrok_running(self):
         result = subprocess.run(
@@ -127,6 +131,22 @@ class ClaudeBotApp(rumps.App):
         self.update_status()
 
     def stop_bot(self, _):
+        # Use PID file for precise kill
+        pid_file = "/tmp/claudebot.pid"
+        if os.path.exists(pid_file):
+            try:
+                with open(pid_file, 'r') as f:
+                    pid = int(f.read().strip())
+                os.kill(pid, 15)  # SIGTERM - graceful
+                time.sleep(2)
+                try:
+                    os.kill(pid, 9)  # SIGKILL if still alive
+                except OSError:
+                    pass
+                os.remove(pid_file)
+            except (OSError, ValueError):
+                pass
+        # Fallback: pkill
         subprocess.run(["pkill", "-f", "telegram-claude-bot/bot.py"], capture_output=True)
         subprocess.run(["pkill", "-f", "ngrok"], capture_output=True)
         subprocess.run("lsof -ti:8080 | xargs kill -9 2>/dev/null", shell=True, capture_output=True)

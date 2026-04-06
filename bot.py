@@ -1,12 +1,55 @@
 import os
+import sys
 import json
 import logging
 import subprocess
 import time
+import signal
+import atexit
 from datetime import datetime, time as dt_time
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 import anthropic
+
+# === SINGLE INSTANCE LOCK ===
+PID_FILE = "/tmp/claudebot.pid"
+
+def check_single_instance():
+    """Ensure only one bot instance runs. Kill any existing instance first."""
+    if os.path.exists(PID_FILE):
+        try:
+            with open(PID_FILE, 'r') as f:
+                old_pid = int(f.read().strip())
+            # Check if that process is actually running
+            os.kill(old_pid, 0)
+            # It's running — kill it so we can take over
+            print(f"⚠️ Killing existing bot instance (PID {old_pid})...")
+            os.kill(old_pid, signal.SIGTERM)
+            time.sleep(2)
+            try:
+                os.kill(old_pid, signal.SIGKILL)  # Force kill if still alive
+            except OSError:
+                pass
+            time.sleep(1)
+        except (OSError, ValueError):
+            # Process not running, stale PID file
+            pass
+
+    # Write our PID
+    with open(PID_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+
+def cleanup_pid():
+    """Remove PID file on exit"""
+    try:
+        if os.path.exists(PID_FILE):
+            with open(PID_FILE, 'r') as f:
+                if int(f.read().strip()) == os.getpid():
+                    os.remove(PID_FILE)
+    except:
+        pass
+
+atexit.register(cleanup_pid)
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -930,6 +973,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+    check_single_instance()
     load_memory()
     log_activity("bot_started", detail=f"whitelist={ALLOWED_USER_IDS or 'NONE - UNSECURED'}")
 
