@@ -738,11 +738,14 @@ build_watchers = {}  # pid -> {"command": str, "chat_id": int, "start": float}
 
 async def check_builds(context):
     """Check if any watched build processes have finished"""
+    if not build_watchers:
+        return
+    logging.debug(f"Checking {len(build_watchers)} background tasks")
     finished = []
     for pid, info in list(build_watchers.items()):
         try:
             os.kill(pid, 0)  # Check if still running
-        except OSError:
+        except (OSError, ProcessLookupError):
             # Process finished
             elapsed = int(time.time() - info["start"])
             # Read last few lines of output
@@ -755,16 +758,17 @@ async def check_builds(context):
                         tail = "".join(lines[-5:]).strip()
                         if tail:
                             tail = f"\n```\n{tail[:500]}\n```"
-                except:
-                    pass
-            msg = f"🔔 *Done* ({elapsed}s): `{info['command'][:100]}`{tail}"
+                except Exception as e:
+                    logging.error(f"Failed to read log {log_file}: {e}")
+            msg = f"🔔 Done ({elapsed}s): {info['command'][:100]}{tail}"
             try:
+                logging.info(f"Sending build notification to chat {info['chat_id']}: {msg[:100]}")
                 await context.bot.send_message(
                     chat_id=info["chat_id"],
                     text=msg
                 )
-            except:
-                pass
+            except Exception as e:
+                logging.error(f"Failed to send build notification: {e}")
             finished.append(pid)
             log_activity("build_finished", detail=info["command"])
 
