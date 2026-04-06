@@ -2,11 +2,11 @@
 # Start Claude Bot Menu Bar App
 # Double-click this file to launch — Terminal window will close automatically
 
-cd ~/telegram-claude-bot
+cd ~/Documents/Claude\ Projects/telegram-claude-bot
 
 # Kill any existing instances first
-pkill -f "telegram-claude-bot/bot.py" 2>/dev/null
-pkill -f "telegram-claude-bot/menubar.py" 2>/dev/null
+pkill -f "Claude Projects/telegram-claude-bot/bot.py" 2>/dev/null
+pkill -f "Claude Projects/telegram-claude-bot/menubar.py" 2>/dev/null
 sleep 2
 
 # Source environment

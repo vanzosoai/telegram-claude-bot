@@ -150,7 +150,7 @@ def check_rate_limit(user_id):
     return True, "ok"
 
 # Persistent memory: save/load conversation history to disk
-MEMORY_FILE = os.path.expanduser("~/telegram-claude-bot/.bot_memory.json")
+MEMORY_FILE = os.path.expanduser("~/Documents/Claude Projects/telegram-claude-bot/.bot_memory.json")
 
 def save_memory():
     """Save conversation history and token usage to disk for persistence across restarts"""
@@ -221,7 +221,7 @@ PROJECTS_DIR = os.path.expanduser("~/Documents/Claude Projects")
 ALLOWED_PATHS = [
     PROJECTS_DIR,
     os.path.expanduser("~/Projects"),  # legacy path
-    os.path.expanduser("~/telegram-claude-bot"),
+    os.path.expanduser("~/Documents/Claude Projects/telegram-claude-bot"),
     os.path.expanduser("~/Desktop"),
     "/tmp",
 ]
@@ -796,7 +796,7 @@ Projects: {PROJECTS_DIR}
 You can ONLY work within these folders:
 - {PROJECTS_DIR} (primary — all new projects go here)
 - /Users/johnjurkoii/Projects (legacy projects)
-- /Users/johnjurkoii/telegram-claude-bot (bot files)
+- ~/Documents/Claude Projects/telegram-claude-bot (bot files)
 - /Users/johnjurkoii/Desktop
 - /tmp
 

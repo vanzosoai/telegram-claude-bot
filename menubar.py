@@ -6,9 +6,9 @@ import tempfile
 import base64
 
 MENUBAR_PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/com.johnjurkoii.claudemenubar.plist")
-BOT_PATH = "/Users/johnjurkoii/telegram-claude-bot/bot.py"
-BOT_DIR = "/Users/johnjurkoii/telegram-claude-bot"
-MENUBAR_PATH = "/Users/johnjurkoii/telegram-claude-bot/menubar.py"
+BOT_PATH = os.path.expanduser("~/Documents/Claude Projects/telegram-claude-bot/bot.py")
+BOT_DIR = os.path.expanduser("~/Documents/Claude Projects/telegram-claude-bot")
+MENUBAR_PATH = os.path.expanduser("~/Documents/Claude Projects/telegram-claude-bot/menubar.py")
 
 # Base64-encoded 44x44 PNG template icon (terminal prompt silhouette)
 ICON_B64 = "iVBORw0KGgoAAAANSUhEUgAAACwAAAAsCAYAAAAehFoBAAABIElEQVR4nO2Y3Q7DIAiFZdn7v7K7qZ2zQ46AWlPPxTJTfr4xwKQU+ihm38kz8Msz2KEonE3yBubg3KB7VLirHg/MDZjb4PWocAl3+y3RVRu4t1r6y/UCYCTyoBUeAQvlQYBHwUL5JODRsGLeGvAs2Gr+5bbEcsDlGpndBjVRCL8VvjNsCAff2xwlfn8nEb/3UTtJuWdThXOAS9AMCLUDReYKU5Y1VuhQO0mqLZHyUVGidE7PUbsWLbfWngGc/uGyF9M5PUftWuSx1qBGtAxaLvNNN3AP0/nB5dBEddaFb7mhc72aUVmuZlOFtXNkmT81sHXotf7L9bAa2NKHFv8asBhRmxT0+2uEeM7YxywX0hKur0ut+dAeHgU9ujhbW1uSPlK9YkSi1oxJAAAAAElFTkSuQmCC"
@@ -135,7 +135,7 @@ class ClaudeBotApp(rumps.App):
             except (OSError, ValueError):
                 pass
         # Fallback: pkill
-        subprocess.run(["pkill", "-f", "telegram-claude-bot/bot.py"], capture_output=True)
+        subprocess.run(["pkill", "-f", "Claude Projects/telegram-claude-bot/bot.py"], capture_output=True)
         # Kill any dev servers the bot started
         subprocess.run("lsof -ti:8080 | xargs kill -9 2>/dev/null", shell=True, capture_output=True)
         rumps.notification("Claude Bot", "Stopped", "🤖 Bot stopped.")
