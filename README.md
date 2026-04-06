@@ -1,4 +1,4 @@
-# Claude Bot — Remote Coding Agent for Telegram
+# Piclo Bot — Remote Coding Agent for Telegram
 
 Control your Mac's coding environment from your phone via Telegram. Claude (Anthropic's AI) acts as your hands — writing code, running commands, serving apps, taking screenshots, and more.
 
@@ -56,7 +56,7 @@ Or just talk naturally — anything that doesn't match a command goes to Claude.
 | Feature | Status | Description |
 |---------|--------|-------------|
 | Telegram ID whitelist | ✅ Done | `ALLOWED_TELEGRAM_IDS` env var, defaults to owner |
-| Activity logging | ✅ Done | All actions logged to `/tmp/claudebot_activity.log` |
+| Activity logging | ✅ Done | All actions logged to `/tmp/piclobot_activity.log` |
 | Rate limiting | ✅ Done | 30 calls per 5 minutes per user |
 | Emergency kill code | ✅ Done | Send `killclaudenow` to nuke everything |
 | Path restrictions | ✅ Done | Bot can only access ~/Projects, ~/Desktop, ~/telegram-claude-bot, /tmp |

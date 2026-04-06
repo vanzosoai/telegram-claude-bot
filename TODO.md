@@ -1,8 +1,8 @@
-# Telegram Claude Bot - TODO
+# Piclo Bot - TODO
 
 ## SECURITY
 - [x] 1. Add Telegram user ID whitelist so only my account can talk to the bot
-- [x] 2. Add activity log saving everything the bot does to /tmp/claudebot_activity.log
+- [x] 2. Add activity log saving everything the bot does to /tmp/piclobot_activity.log
 - [x] 3. Add rate limiting to prevent API credit burn if something goes haywire
 
 ## EFFICIENCY

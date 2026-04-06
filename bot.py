@@ -9,10 +9,11 @@ import atexit
 from datetime import datetime, time as dt_time
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
+import asyncio
 import anthropic
 
 # === SINGLE INSTANCE LOCK ===
-PID_FILE = "/tmp/claudebot.pid"
+PID_FILE = "/tmp/piclobot.pid"
 
 def check_single_instance():
     """Ensure only one bot instance runs. Kill any existing instance first."""
@@ -58,15 +59,68 @@ logging.basicConfig(
 
 # Activity logger - separate file for audit trail
 activity_logger = logging.getLogger('activity')
-activity_handler = logging.FileHandler('/tmp/claudebot_activity.log')
+activity_handler = logging.FileHandler('/tmp/piclobot_activity.log')
 activity_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
 activity_logger.addHandler(activity_handler)
 activity_logger.setLevel(logging.INFO)
 
 def log_activity(event_type, user_id=None, detail=""):
-    """Log all bot activity to /tmp/claudebot_activity.log"""
+    """Log all bot activity to /tmp/piclobot_activity.log"""
     entry = {"event": event_type, "user_id": user_id, "detail": detail[:500]}
     activity_logger.info(json.dumps(entry))
+
+
+def log_handoff_session(user_message, bot_response, tools_used=None, source="Telegram"):
+    """Append a session entry to the bot's HANDOFF.md so Cowork knows what happened.
+
+    Only logs meaningful interactions (tool use, code changes, project work).
+    Skips casual chitchat to keep the work log clean and useful.
+    """
+    try:
+        from datetime import datetime, timezone
+
+        # Skip logging for trivial interactions (short Q&A, greetings, etc.)
+        if not tools_used and len(bot_response) < 200:
+            return
+        if any(skip in user_message.lower() for skip in ["hello", "hi ", "hey ", "thanks", "thank you", "ok", "cool"]):
+            if not tools_used:
+                return
+
+        handoff_path = os.path.join(BOT_OWN_DIR, "HANDOFF.md")
+        if not os.path.exists(handoff_path):
+            return
+
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+        # Build a concise summary focused on what was DONE, not the full response
+        user_short = user_message[:100].replace('\n', ' ').strip()
+        if tools_used:
+            tools_summary = ", ".join(tools_used[:5])
+            entry = f"- {timestamp} (Piclo Bot) — \"{user_short}\" [tools: {tools_summary}]\n"
+        else:
+            # For non-tool responses, summarize the first sentence of the response
+            first_line = bot_response.split('\n')[0][:150].strip()
+            entry = f"- {timestamp} (Piclo Bot) — \"{user_short}\" → {first_line}\n"
+
+        with open(handoff_path, 'r') as f:
+            content = f.read()
+
+        marker = "### Work Log\n"
+        if marker in content:
+            pos = content.index(marker) + len(marker)
+            content = content[:pos] + entry + content[pos:]
+
+            import re
+            content = re.sub(
+                r'## Last touched:.*',
+                f'## Last touched: {timestamp} by Piclo Bot (Telegram)',
+                content
+            )
+
+            with open(handoff_path, 'w') as f:
+                f.write(content)
+    except Exception as e:
+        logging.warning(f"Handoff log failed (non-critical): {e}")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
@@ -149,21 +203,29 @@ def check_rate_limit(user_id):
     rate_limit_tracker[user_id].append(now)
     return True, "ok"
 
-# Persistent memory: save/load conversation history to disk
+# Persistent memory: save/load conversation history + session context to disk
 MEMORY_FILE = os.path.expanduser("~/Documents/Claude Projects/telegram-claude-bot/.bot_memory.json")
 
+# Session context — persists across restarts so the bot never loses track of what's happening
+session_context = {}  # user_id -> {"active_project": str, "active_task": str, "last_tools": list, "summary": str}
+
 def save_memory():
-    """Save conversation history and token usage to disk for persistence across restarts"""
+    """Save conversation history, token usage, and session context to disk"""
     try:
-        # Convert to serializable format, keeping last 20 messages per user
+        # Convert to serializable format, keeping last 40 messages per user
+        # IMPORTANT: Only save simple user/assistant text messages.
+        # Tool use/result blocks have ephemeral IDs that cause 400 errors
+        # if loaded into a new session. The session_context captures what
+        # tools did without the fragile ID references.
         convos = {}
         for uid, messages in conversation_history.items():
             serializable = []
-            for msg in messages[-20:]:
+            for msg in messages[-40:]:
                 if isinstance(msg.get("content"), str):
                     serializable.append(msg)
                 elif isinstance(msg.get("content"), list):
-                    # Tool results - skip for persistence (they contain ephemeral data)
+                    # Tool results/tool use blocks — skip entirely
+                    # (their tool_use_ids become orphaned across restarts)
                     continue
                 else:
                     # Assistant content blocks - convert to text
@@ -178,50 +240,120 @@ def save_memory():
                         continue
             convos[str(uid)] = serializable
 
+        # Serialize session context
+        ctx = {}
+        for uid, context in session_context.items():
+            ctx[str(uid)] = context
+
         data = {
             "conversations": convos,
             "token_usage": token_usage,
+            "session_context": ctx,
+            "saved_at": time.time(),
         }
         with open(MEMORY_FILE, 'w') as f:
-            json.dump(data, f)
+            json.dump(data, f, indent=2)
     except Exception as e:
         logging.error(f"Failed to save memory: {e}")
 
 def load_memory():
-    """Load conversation history and token usage from disk"""
-    global conversation_history, token_usage
+    """Load conversation history, token usage, and session context from disk"""
+    global conversation_history, token_usage, session_context
     try:
         if os.path.exists(MEMORY_FILE):
             with open(MEMORY_FILE, 'r') as f:
                 data = json.load(f)
-            # Handle both old format (flat dict) and new format (nested)
             if "conversations" in data:
-                conversation_history = {int(k): v for k, v in data["conversations"].items()}
+                raw_convos = {int(k): v for k, v in data["conversations"].items()}
+                # Sanitize: strip any tool_result messages that would cause
+                # orphaned tool_use_id errors with the API
+                for uid, msgs in raw_convos.items():
+                    clean = []
+                    for msg in msgs:
+                        content = msg.get("content", "")
+                        if isinstance(content, list):
+                            # This is a tool_result or tool_use block — skip it
+                            continue
+                        if isinstance(content, str):
+                            clean.append(msg)
+                    raw_convos[uid] = clean
+                conversation_history = raw_convos
                 saved_usage = data.get("token_usage", {})
                 if saved_usage:
                     token_usage["total_input"] = saved_usage.get("total_input", 0)
                     token_usage["total_output"] = saved_usage.get("total_output", 0)
                     token_usage["session_messages"] = saved_usage.get("session_messages", 0)
                     token_usage["by_model"] = saved_usage.get("by_model", {})
+                # Load session context
+                saved_ctx = data.get("session_context", {})
+                session_context = {int(k): v for k, v in saved_ctx.items()}
+
+                saved_time = data.get("saved_at", 0)
+                age_min = (time.time() - saved_time) / 60 if saved_time else 0
+                logging.info(f"Loaded memory: {len(conversation_history)} users, "
+                           f"{len(session_context)} active contexts, "
+                           f"saved {age_min:.0f}min ago")
             else:
-                # Old format: flat dict of conversations
                 conversation_history = {int(k): v for k, v in data.items()}
-            logging.info(f"Loaded memory for {len(conversation_history)} users, {token_usage['session_messages']} historical messages tracked")
     except Exception as e:
         logging.error(f"Failed to load memory: {e}")
         conversation_history = {}
+        session_context = {}
+
+
+def update_session_context(user_id, user_message, bot_response, tools_used=None):
+    """Update the persistent session context for a user.
+
+    This is the bot's 'working memory' — what project are we in, what task
+    is in progress, what tools were just used. Survives restarts.
+    """
+    if user_id not in session_context:
+        session_context[user_id] = {
+            "active_project": None,
+            "active_task": None,
+            "last_tools": [],
+            "summary": "",
+            "last_interaction": 0,
+        }
+
+    ctx = session_context[user_id]
+    ctx["last_interaction"] = time.time()
+    ctx["last_tools"] = (tools_used or [])[-10:]  # Last 10 tools used
+
+    # Try to detect active project from tool usage (file paths, cwd references)
+    if tools_used:
+        for tool in tools_used:
+            if tool in ["read_file", "write_file", "run_command", "serve_project"]:
+                # The project context gets set by the conversation naturally
+                pass
+
+    # Build a running summary of the session (last 3 exchanges)
+    user_short = user_message[:100].strip()
+    response_short = bot_response.split('\n')[0][:150].strip()
+    summary_entry = f"User: {user_short} → Bot: {response_short}"
+
+    # Keep a rolling window of recent context
+    existing = ctx.get("summary", "")
+    lines = existing.split(" | ") if existing else []
+    lines.append(summary_entry)
+    ctx["summary"] = " | ".join(lines[-5:])  # Keep last 5 exchanges
 
 # Change this to your secret kill code
-KILL_CODE = "killclaudenow"
+KILL_CODE = "killpiclonow"
 
-# Shared projects folder — both Cowork and Claude Bot use this
-PROJECTS_DIR = os.path.expanduser("~/Documents/Claude Projects")
+# Shared projects folder — read from config (user picks on first launch)
+from config import get_projects_dir
+_configured_dir = get_projects_dir()
+PROJECTS_DIR = _configured_dir if _configured_dir else os.path.expanduser("~/Documents/Claude Projects")
+
+# Bot's own directory (for self-referencing)
+BOT_OWN_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Only allow operations in these folders
 ALLOWED_PATHS = [
     PROJECTS_DIR,
+    BOT_OWN_DIR,
     os.path.expanduser("~/Projects"),  # legacy path
-    os.path.expanduser("~/Documents/Claude Projects/telegram-claude-bot"),
     os.path.expanduser("~/Desktop"),
     "/tmp",
 ]
@@ -288,11 +420,12 @@ tools = [
     },
     {
         "name": "screenshot",
-        "description": "Take a screenshot of the Mac. User has 2 displays. By default captures both. Returns the image(s) to Telegram.",
+        "description": "Take a screenshot of the Mac. Can capture all displays, a single display, or a specific app window. When the user says 'show me the app' or 'what does X look like', use window mode with the app name.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "display": {"type": "string", "description": "Which display: 'all' (default, both displays), '1' (main), or '2' (secondary)", "default": "all"}
+                "display": {"type": "string", "description": "Which display: 'all' (default, both displays), '1' (main), or '2' (secondary)", "default": "all"},
+                "window": {"type": "string", "description": "App name to capture a specific window (e.g. 'Safari', 'Chrome', 'Terminal', 'Finder'). If set, captures just that app's frontmost window instead of the full screen."}
             },
             "required": []
         }
@@ -448,24 +581,66 @@ def execute_tool(tool_name, tool_input, chat_id=None):
 
         elif tool_name == "screenshot":
             display = tool_input.get("display", "all")
+            window_app = tool_input.get("window", "")
             screenshot_raw_1 = "/tmp/bot_screenshot_1.png"
             screenshot_raw_2 = "/tmp/bot_screenshot_2.png"
             screenshot_path = "/tmp/bot_screenshot.jpg"
 
-            if display == "all" or display == "both":
+            if window_app:
+                # Targeted window capture — get a specific app's window
+                screenshot_raw = "/tmp/bot_screenshot_window.png"
+                try:
+                    # Use AppleScript to get the window ID of the target app
+                    window_id_script = f'''
+                    tell application "System Events"
+                        set appProc to first process whose name contains "{window_app}"
+                        set winID to id of first window of appProc
+                        return winID
+                    end tell
+                    '''
+                    id_result = subprocess.run(
+                        ["osascript", "-e", window_id_script],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    if id_result.returncode == 0 and id_result.stdout.strip():
+                        win_id = id_result.stdout.strip()
+                        result = subprocess.run(
+                            ["screencapture", "-x", "-l", win_id, screenshot_raw],
+                            capture_output=True, text=True, timeout=10
+                        )
+                    else:
+                        # Fallback: bring app to front and capture the main screen
+                        subprocess.run(
+                            ["osascript", "-e", f'tell application "{window_app}" to activate'],
+                            capture_output=True, timeout=5
+                        )
+                        time.sleep(0.5)
+                        result = subprocess.run(
+                            ["screencapture", "-x", screenshot_raw],
+                            capture_output=True, text=True, timeout=10
+                        )
+                except Exception:
+                    # Final fallback: just capture the screen
+                    result = subprocess.run(
+                        ["screencapture", "-x", screenshot_raw],
+                        capture_output=True, text=True, timeout=10
+                    )
+
+                if not os.path.exists(screenshot_raw):
+                    return f"Failed to capture {window_app} window"
+
+            elif display == "all" or display == "both":
                 # Capture both displays as separate files
                 result = subprocess.run(
                     ["screencapture", "-x", screenshot_raw_1, screenshot_raw_2],
                     capture_output=True, text=True, timeout=10
                 )
-                # Use whichever has the most content (largest file = main display)
                 screenshots = []
                 for f in [screenshot_raw_1, screenshot_raw_2]:
                     if os.path.exists(f):
                         screenshots.append(f)
                 if not screenshots:
                     return f"Failed to take screenshot: {result.stderr}"
-                # Send the largest one (most likely the active display)
                 screenshots.sort(key=lambda f: os.path.getsize(f), reverse=True)
                 screenshot_raw = screenshots[0]
             else:
@@ -485,8 +660,7 @@ def execute_tool(tool_name, tool_input, chat_id=None):
                 capture_output=True, text=True, timeout=10
             )
             if os.path.exists(screenshot_path):
-                # If we got both displays, send both
-                if display in ["all", "both"] and len(screenshots) > 1:
+                if not window_app and display in ["all", "both"] and len(screenshots) > 1:
                     second_jpg = "/tmp/bot_screenshot_2.jpg"
                     subprocess.run(
                         ["sips", "--resampleWidth", "1920", "--setProperty", "format", "jpeg",
@@ -495,6 +669,7 @@ def execute_tool(tool_name, tool_input, chat_id=None):
                     )
                     if os.path.exists(second_jpg):
                         return f"SCREENSHOT_SAVED:{screenshot_path}|{second_jpg}"
+                caption = f" of {window_app}" if window_app else ""
                 return f"SCREENSHOT_SAVED:{screenshot_path}"
             return f"SCREENSHOT_SAVED:{screenshot_raw}"
 
@@ -674,7 +849,54 @@ def execute_tool(tool_name, tool_input, chat_id=None):
         log_activity("tool_error", detail=f"{tool_name}: {str(e)}")
         return f"Error executing {tool_name}: {str(e)}"
 
-async def send_long_message(update, text):
+def sanitize_messages(messages):
+    """Remove orphaned tool_result blocks that would cause API 400 errors.
+
+    The Anthropic API requires every tool_result to reference a tool_use_id
+    that exists earlier in the conversation. If conversation history gets
+    truncated or corrupted, tool_results can become orphaned. This strips them.
+    """
+    # Collect all tool_use IDs present in assistant messages
+    valid_tool_ids = set()
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            for block in content:
+                # Handle both dict and object-style blocks
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    valid_tool_ids.add(block.get("id", ""))
+                elif hasattr(block, "type") and block.type == "tool_use":
+                    valid_tool_ids.add(block.id)
+
+    # Filter out tool_result messages with orphaned IDs
+    clean = []
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            # Check if this is a tool_result message
+            has_tool_results = any(
+                (isinstance(b, dict) and b.get("type") == "tool_result")
+                for b in content
+            )
+            if has_tool_results:
+                # Keep only tool_results whose IDs exist in the conversation
+                filtered = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        if block.get("tool_use_id", "") in valid_tool_ids:
+                            filtered.append(block)
+                    else:
+                        filtered.append(block)
+                if filtered:
+                    clean.append({"role": msg["role"], "content": filtered})
+                # If all blocks were orphaned, drop the entire message
+                continue
+        clean.append(msg)
+    return clean
+
+
+async def send_long_message(update, text, voice_reply=False):
+    """Send a text response, optionally with a voice note version."""
     MAX_LENGTH = 4000
     if len(text) <= MAX_LENGTH:
         await update.message.reply_text(text)
@@ -682,6 +904,199 @@ async def send_long_message(update, text):
         chunks = [text[i:i+MAX_LENGTH] for i in range(0, len(text), MAX_LENGTH)]
         for chunk in chunks:
             await update.message.reply_text(chunk)
+
+    # If the user sent a voice message, send a voice summary back
+    if voice_reply:
+        await send_voice_reply(update, text)
+
+
+async def stream_response_to_telegram(update, context, model, system_prompt, messages):
+    """Stream Claude's response with live message editing in Telegram.
+    Returns (full_response_obj, final_text) for tool_use or (response_obj, final_text) for text.
+    For tool_use responses, falls back to non-streaming since we need the full response."""
+
+    # First, try streaming. Collect text and watch for tool_use.
+    collected_text = ""
+    collected_blocks = []
+    sent_message = None
+    last_edit_time = 0
+    EDIT_INTERVAL = 0.8  # Telegram rate limits edits; don't hammer it
+    input_tokens = 0
+    output_tokens = 0
+    stop_reason = None
+
+    try:
+        with client.messages.stream(
+            model=model,
+            max_tokens=4096,
+            system=system_prompt,
+            messages=messages,
+            tools=tools
+        ) as stream:
+            for event in stream:
+                if hasattr(event, 'type'):
+                    if event.type == 'content_block_start':
+                        if hasattr(event.content_block, 'type') and event.content_block.type == 'tool_use':
+                            # Tool use detected — we need to collect the full response
+                            pass
+                    elif event.type == 'content_block_delta':
+                        if hasattr(event.delta, 'text'):
+                            collected_text += event.delta.text
+                            now = time.time()
+                            # Send or edit the message periodically
+                            if now - last_edit_time >= EDIT_INTERVAL and len(collected_text) > 0:
+                                try:
+                                    if sent_message is None:
+                                        sent_message = await update.message.reply_text(collected_text[:4000])
+                                    else:
+                                        display = collected_text[:4000]
+                                        if display != (sent_message.text or ""):
+                                            await sent_message.edit_text(display)
+                                    last_edit_time = now
+                                except Exception as e:
+                                    logging.debug(f"Stream edit skipped: {e}")
+
+            # Get the final message object from the stream
+            final_message = stream.get_final_message()
+            stop_reason = final_message.stop_reason
+            input_tokens = final_message.usage.input_tokens if hasattr(final_message, 'usage') else 0
+            output_tokens = final_message.usage.output_tokens if hasattr(final_message, 'usage') else 0
+
+        # Final edit to make sure the complete text is shown
+        if collected_text and sent_message:
+            try:
+                if len(collected_text) <= 4000:
+                    if collected_text != (sent_message.text or ""):
+                        await sent_message.edit_text(collected_text)
+                else:
+                    # Text exceeded one message — send remaining chunks
+                    chunks = [collected_text[i:i+4000] for i in range(4000, len(collected_text), 4000)]
+                    for chunk in chunks:
+                        await update.message.reply_text(chunk)
+            except Exception as e:
+                logging.debug(f"Final stream edit skipped: {e}")
+        elif collected_text and not sent_message:
+            # Never managed to send — send now
+            await send_long_message(update, collected_text)
+
+        return final_message, collected_text, sent_message
+
+    except Exception as e:
+        logging.error(f"Streaming failed, falling back to blocking: {e}")
+        # Fallback to non-streaming
+        response = client.messages.create(
+            model=model,
+            max_tokens=4096,
+            system=system_prompt,
+            messages=messages,
+            tools=tools
+        )
+        final_text = ""
+        for block in response.content:
+            if hasattr(block, "text"):
+                final_text += block.text
+        return response, final_text, None
+
+
+async def send_voice_reply(update, text):
+    """Generate and send a TTS voice note summarizing the response."""
+    import uuid
+    tts_path = f"/tmp/piclobot_tts_{uuid.uuid4().hex[:8]}.aiff"
+    ogg_path = tts_path.replace('.aiff', '.ogg')
+    try:
+        # Strip markdown, code blocks, emojis, and clutter for clean speech
+        import re
+        clean = re.sub(r'```[\s\S]*?```', 'See code in the text response.', text)
+        clean = re.sub(r'`[^`]+`', '', clean)
+        clean = re.sub(r'[*_#>~\[\]()]', '', clean)
+        clean = re.sub(r'https?://\S+', 'link in the text response', clean)
+        # Strip all emojis and unicode symbols
+        clean = re.sub(r'[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF\U0001F1E0-\U0001F1FF\U0001F900-\U0001F9FF\U0001FA00-\U0001FA6F\U0001FA70-\U0001FAFF\U00002702-\U000027B0\U000024C2-\U0001F251\U00002600-\U000026FF\U00002700-\U000027BF\U0000FE00-\U0000FE0F\U0000200D\U00002B50\U00002B55\U000023CF\U000023E9-\U000023F3\U000023F8-\U000023FA\U0000231A\U0000231B\U000025AA-\U000025FE\U00002934\U00002935\U00002328\U000023CF]+', '', clean)
+        # Clean up any leftover double spaces
+        clean = re.sub(r'  +', ' ', clean)
+        clean = clean.strip()
+
+        # Truncate for TTS — keep it brief
+        if len(clean) > 500:
+            sentences = re.split(r'(?<=[.!?])\s+', clean)
+            clean = ' '.join(sentences[:3]) + ' Check the text response for full details.'
+
+        if not clean or len(clean) < 10:
+            logging.warning(f"TTS skipped: cleaned text too short ({len(clean)} chars)")
+            return
+
+        # Use macOS say for TTS
+        # Use a more natural macOS voice if available
+        # Samantha (premium) > Daniel > default. Falls back gracefully.
+        logging.info(f"TTS: generating speech ({len(clean)} chars)...")
+        say_cmd = ["say", "-o", tts_path]
+        # Try premium voices first, fall back to default
+        for voice in ["Samantha (Enhanced)", "Samantha", "Daniel"]:
+            test = subprocess.run(["say", "-v", voice, ""], capture_output=True)
+            if test.returncode == 0:
+                say_cmd.extend(["-v", voice])
+                break
+        say_cmd.append(clean)
+        result = subprocess.run(
+            say_cmd,
+            capture_output=True, timeout=30
+        )
+        if result.returncode != 0:
+            err = result.stderr.decode() if result.stderr else "unknown error"
+            logging.error(f"TTS say failed (rc={result.returncode}): {err}")
+            await update.message.reply_text(f"🔇 Voice generation failed: {err[:200]}")
+            return
+
+        # Convert to ogg/opus for Telegram voice notes
+        logging.info("TTS: converting to opus...")
+        conv = subprocess.run(
+            ["ffmpeg", "-i", tts_path, "-c:a", "libopus", "-b:a", "64k", "-y", ogg_path],
+            capture_output=True, timeout=15
+        )
+        if conv.returncode != 0:
+            err = conv.stderr.decode() if conv.stderr else "unknown error"
+            logging.error(f"TTS ffmpeg failed (rc={conv.returncode}): {err}")
+            await update.message.reply_text(f"🔇 Voice conversion failed: {err[:200]}")
+            return
+
+        # Verify file exists and has content
+        if not os.path.exists(ogg_path) or os.path.getsize(ogg_path) < 100:
+            logging.error(f"TTS ogg file missing or too small: {ogg_path}")
+            await update.message.reply_text("🔇 Voice file was empty — TTS may not be working.")
+            return
+
+        # Get duration so Telegram renders the proper voice player with speed controls
+        duration = None
+        try:
+            probe = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", ogg_path],
+                capture_output=True, text=True, timeout=5
+            )
+            if probe.returncode == 0 and probe.stdout.strip():
+                duration = int(float(probe.stdout.strip()))
+        except Exception:
+            pass  # Duration is optional, voice still sends without it
+
+        # Send as voice note
+        logging.info(f"TTS: sending voice note ({os.path.getsize(ogg_path)} bytes, {duration}s)...")
+        with open(ogg_path, 'rb') as voice:
+            await update.message.reply_voice(voice=voice, duration=duration)
+        logging.info("TTS: voice note sent successfully")
+
+    except subprocess.TimeoutExpired:
+        logging.error("TTS timed out")
+        await update.message.reply_text("🔇 Voice generation timed out.")
+    except Exception as e:
+        logging.error(f"TTS failed: {e}")
+        await update.message.reply_text(f"🔇 Voice failed: {str(e)[:200]}")
+    finally:
+        for path in [tts_path, ogg_path]:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
 
 def classify_complexity(message):
     """Determine if a message needs Sonnet (complex) or Haiku (simple).
@@ -703,7 +1118,7 @@ def classify_complexity(message):
             return "claude-sonnet-4-6"
     return "claude-haiku-4-5-20251001"
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, text_override=None):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, text_override=None, from_voice=False):
     user_id = update.effective_user.id
     user_name = update.effective_user.username or "unknown"
     user_message = text_override or update.message.text
@@ -739,6 +1154,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
     for handler, phrases in shortcut_map.items():
         if any(phrase in msg_lower for phrase in phrases):
             await handler(update, context)
+            # Send voice reply for shortcut commands too
+            if from_voice:
+                # Grab last bot message for TTS (the command handler already sent text)
+                # We can't easily get the text back, so just confirm vocally
+                await send_voice_reply(update, f"Done. I ran the {handler.__name__.replace('cmd_', '')} command. Check the text response for details.")
             return
 
     # Emergency kill code - nuclear shutdown
@@ -748,8 +1168,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
         subprocess.run("pkill -9 -f ngrok", shell=True)
         subprocess.run("lsof -ti:8080 | xargs kill -9", shell=True)
         subprocess.run("pkill -9 -f menubar.py", shell=True)
-        subprocess.run("launchctl unload ~/Library/LaunchAgents/com.johnjurkoii.claudebot.plist 2>/dev/null", shell=True)
-        subprocess.run("launchctl unload ~/Library/LaunchAgents/com.johnjurkoii.claudemenubar.plist 2>/dev/null", shell=True)
+        subprocess.run("launchctl unload ~/Library/LaunchAgents/com.piclobot.legacy.plist 2>/dev/null", shell=True)
+        subprocess.run("launchctl unload ~/Library/LaunchAgents/com.piclobot.menubar.plist 2>/dev/null", shell=True)
         os._exit(0)
 
     # Rate limiting
@@ -767,29 +1187,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
         "content": user_message
     })
 
-    await context.bot.send_chat_action(
+    # Fire-and-forget typing indicator — don't block on it
+    asyncio.create_task(context.bot.send_chat_action(
         chat_id=update.effective_chat.id,
         action="typing"
-    )
+    ))
 
-    # Smart model routing
+    # Smart model routing + sanitization (these are fast CPU ops)
     model = classify_complexity(user_message)
     model_label = "⚡" if "haiku" in model else "🧠"
     logging.info(f"Model selected: {model} for message from {user_id}")
     log_activity("model_selected", user_id, f"{model} for: {user_message[:100]}")
 
-    messages = conversation_history[user_id].copy()
-    MAX_ITERATIONS = 6  # Bumped from 4 for complex tasks
+    messages = sanitize_messages(conversation_history[user_id].copy())
+    MAX_ITERATIONS = 6
     iteration = 0
+    tools_used_this_session = []
 
-    while iteration < MAX_ITERATIONS:
-        iteration += 1
+    # Build session context hint for the system prompt
+    ctx = session_context.get(user_id, {})
+    context_hint = ""
+    if ctx.get("summary"):
+        context_hint = f"\n\nSESSION CONTEXT (recent activity, survives restarts):\n{ctx['summary']}"
+        if ctx.get("last_tools"):
+            context_hint += f"\nRecent tools used: {', '.join(ctx['last_tools'][-5:])}"
+        age = (time.time() - ctx.get("last_interaction", 0)) / 60
+        if age > 60:
+            context_hint += f"\n(Last interaction was {age:.0f} minutes ago — user may have been away)"
 
-        response = client.messages.create(
-            model=model,
-            max_tokens=4096,
-            system=f"""You are a coding agent on the user's Mac. Be concise and efficient - we're on mobile.
+    # Build system prompt once (reused across iterations)
+    system_prompt = f"""You are Piclo Bot, a coding agent on the user's Mac. Be concise and efficient - we're on mobile.
 You have tools to run shell commands, read and write files, list projects, and take screenshots.
+When the user sends a voice message, you will automatically receive a text transcription of it. Your text response will automatically be converted to a voice note and sent back alongside the text. You DO have voice/audio capability — don't tell the user otherwise.
 Home directory: /Users/johnjurkoii
 Projects: {PROJECTS_DIR}
 
@@ -804,7 +1233,7 @@ Never touch system files, never use sudo, never modify anything outside these fo
 
 HANDOFF DOCS — CRITICAL WORKFLOW:
 Every project in {PROJECTS_DIR} should have a HANDOFF.md in its root.
-- BEFORE starting work: check the "Last touched" line in HANDOFF.md. If it says "by Claude Bot (Telegram)" then YOU were the last to edit — skip the full re-read and just resume working. If it says "by Cowork (Desktop)" then the OTHER agent made changes — do a full read to absorb new context.
+- BEFORE starting work: check the "Last touched" line in HANDOFF.md. If it says "by Piclo Bot (Telegram)" then YOU were the last to edit — skip the full re-read and just resume working. If it says "by Cowork (Desktop)" then the OTHER agent made changes — do a full read to absorb new context.
 - If no HANDOFF.md exists, create one before doing any other work.
 - AFTER completing work: update HANDOFF.md with what you did and what's next
 - ALL timestamps must be UTC 24-hour format with seconds: YYYY-MM-DD HH:MM:SS UTC
@@ -814,7 +1243,7 @@ Every project in {PROJECTS_DIR} should have a HANDOFF.md in its root.
   ## Summary
   <2-3 sentences: what this app does, who it's for, how it works>
   ## Status: <In Progress | Complete | Blocked | Paused>
-  ## Last touched: <YYYY-MM-DD HH:MM:SS UTC> by Claude Bot (Telegram)
+  ## Last touched: <YYYY-MM-DD HH:MM:SS UTC> by Piclo Bot (Telegram)
   ### Features
   <Running list — append only, never remove>
   - <feature> — <one-line description>
@@ -824,7 +1253,7 @@ Every project in {PROJECTS_DIR} should have a HANDOFF.md in its root.
   - [OPEN] <bug> — <context>
   ### Work Log
   <Append-only, newest first. Each entry gets UTC timestamp + agent name.>
-  - YYYY-MM-DD HH:MM:SS UTC (Claude Bot) — <what was done>
+  - YYYY-MM-DD HH:MM:SS UTC (Piclo Bot) — <what was done>
   ### Next Steps
   - <what should be done next>
   ### Key Files
@@ -843,91 +1272,152 @@ Stop server: lsof -ti:8080 | xargs kill -9 2>/dev/null
 
 IMPORTANT: Complete tasks in as few steps as possible. Do not repeat failed commands.
 All new projects should be created in {PROJECTS_DIR}.
-You are running as: {model_label} {"Haiku (fast)" if "haiku" in model else "Sonnet (powerful)"}""",
-            messages=messages,
-            tools=tools
-        )
+You are running as: {model_label} {"Haiku (fast)" if "haiku" in model else "Sonnet (powerful)"}{context_hint}"""
 
-        track_tokens(response, model)
+    while iteration < MAX_ITERATIONS:
+        iteration += 1
 
-        if response.stop_reason == "tool_use":
-            tool_results = []
-            status_message = ""
+        # On the first iteration with no prior tool use, try streaming for faster perceived response
+        use_streaming = (iteration == 1 and len(tools_used_this_session) == 0)
 
-            for block in response.content:
-                if block.type == "tool_use":
-                    tool_name = block.name
-                    tool_input = block.input
-                    label = tool_input.get('command', tool_name)
-                    status_message += f"⚙️ `{label}`\n"
-                    result = execute_tool(tool_name, tool_input, chat_id=update.effective_chat.id)
+        if use_streaming:
+            try:
+                response, streamed_text, sent_msg = await stream_response_to_telegram(
+                    update, context, model, system_prompt, messages
+                )
+                track_tokens(response, model)
 
-                    # Handle screenshot - send as photo(s) in Telegram
-                    if result and result.startswith("SCREENSHOT_SAVED:"):
-                        paths = result.split(":", 1)[1].split("|")
+                if response.stop_reason == "tool_use":
+                    # Streaming showed partial text, but Claude wants tools.
+                    # Delete the streamed message if it was just thinking text
+                    if sent_msg and streamed_text:
                         try:
-                            for i, spath in enumerate(paths):
-                                if os.path.exists(spath):
-                                    caption = f"📸 Display {i+1}" if len(paths) > 1 else "📸 Screenshot"
-                                    with open(spath, 'rb') as photo:
-                                        await context.bot.send_photo(
-                                            chat_id=update.effective_chat.id,
-                                            photo=photo,
-                                            caption=caption
-                                        )
-                            result = f"Screenshot(s) sent ({len(paths)} display{'s' if len(paths)>1 else ''})."
-                        except Exception as e:
-                            result = f"Screenshot taken but failed to send: {e}"
+                            await sent_msg.delete()
+                        except Exception:
+                            pass
+                    # Fall through to tool handling below
+                else:
+                    # Pure text response — already displayed via streaming
+                    final_response = streamed_text or ""
+                    if not final_response:
+                        for block in response.content:
+                            if hasattr(block, "text"):
+                                final_response += block.text
 
-                    # Handle file send - send file to user in Telegram
-                    elif result and result.startswith("SEND_FILE:"):
-                        file_path = result.split(":", 1)[1]
-                        try:
-                            with open(file_path, 'rb') as f:
-                                await context.bot.send_document(
-                                    chat_id=update.effective_chat.id,
-                                    document=f,
-                                    filename=os.path.basename(file_path),
-                                    caption=f"📤 {os.path.basename(file_path)}"
-                                )
-                            result = f"File sent: {os.path.basename(file_path)}"
-                        except Exception as e:
-                            result = f"File found but failed to send: {e}"
-
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": result
+                    conversation_history[user_id] = messages
+                    conversation_history[user_id].append({
+                        "role": "assistant",
+                        "content": final_response
                     })
 
-            if status_message:
-                await send_long_message(update, status_message)
+                    log_activity("response_sent", user_id, final_response[:200])
+                    update_session_context(user_id, user_message, final_response, tools_used_this_session)
+                    save_memory()
+                    log_handoff_session(user_message, final_response, tools_used=tools_used_this_session)
 
-            messages.append({"role": "assistant", "content": response.content})
-            messages.append({"role": "user", "content": tool_results})
+                    # Voice reply (TTS) — run in parallel, text is already delivered
+                    if from_voice:
+                        await send_voice_reply(update, final_response)
+                    return
 
-        else:
-            final_response = ""
-            for block in response.content:
-                if hasattr(block, "text"):
-                    final_response += block.text
+            except Exception as e:
+                logging.error(f"Streaming path failed, falling back: {e}")
+                use_streaming = False
 
-            conversation_history[user_id] = messages
-            conversation_history[user_id].append({
-                "role": "assistant",
-                "content": final_response
-            })
+        if not use_streaming or (use_streaming and response.stop_reason == "tool_use"):
+            # Non-streaming path: tool iterations or fallback
+            if not (use_streaming and response.stop_reason == "tool_use"):
+                response = client.messages.create(
+                    model=model,
+                    max_tokens=4096,
+                    system=system_prompt,
+                    messages=messages,
+                    tools=tools
+                )
+                track_tokens(response, model)
 
-            log_activity("response_sent", user_id, final_response[:200])
-            save_memory()
-            await send_long_message(update, final_response)
-            return
+            if response.stop_reason == "tool_use":
+                tool_results = []
+                status_message = ""
+
+                for block in response.content:
+                    if block.type == "tool_use":
+                        tool_name = block.name
+                        tool_input = block.input
+                        label = tool_input.get('command', tool_name)
+                        status_message += f"⚙️ `{label}`\n"
+                        tools_used_this_session.append(tool_name)
+                        result = execute_tool(tool_name, tool_input, chat_id=update.effective_chat.id)
+
+                        # Handle screenshot - send as photo(s) in Telegram
+                        if result and result.startswith("SCREENSHOT_SAVED:"):
+                            paths = result.split(":", 1)[1].split("|")
+                            try:
+                                for i, spath in enumerate(paths):
+                                    if os.path.exists(spath):
+                                        caption = f"📸 Display {i+1}" if len(paths) > 1 else "📸 Screenshot"
+                                        with open(spath, 'rb') as photo:
+                                            await context.bot.send_photo(
+                                                chat_id=update.effective_chat.id,
+                                                photo=photo,
+                                                caption=caption
+                                            )
+                                result = f"Screenshot(s) sent ({len(paths)} display{'s' if len(paths)>1 else ''})."
+                            except Exception as e:
+                                result = f"Screenshot taken but failed to send: {e}"
+
+                        # Handle file send - send file to user in Telegram
+                        elif result and result.startswith("SEND_FILE:"):
+                            file_path = result.split(":", 1)[1]
+                            try:
+                                with open(file_path, 'rb') as f:
+                                    await context.bot.send_document(
+                                        chat_id=update.effective_chat.id,
+                                        document=f,
+                                        filename=os.path.basename(file_path),
+                                        caption=f"📤 {os.path.basename(file_path)}"
+                                    )
+                                result = f"File sent: {os.path.basename(file_path)}"
+                            except Exception as e:
+                                result = f"File found but failed to send: {e}"
+
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": result
+                        })
+
+                if status_message:
+                    await send_long_message(update, status_message)
+
+                messages.append({"role": "assistant", "content": response.content})
+                messages.append({"role": "user", "content": tool_results})
+
+            else:
+                final_response = ""
+                for block in response.content:
+                    if hasattr(block, "text"):
+                        final_response += block.text
+
+                conversation_history[user_id] = messages
+                conversation_history[user_id].append({
+                    "role": "assistant",
+                    "content": final_response
+                })
+
+                log_activity("response_sent", user_id, final_response[:200])
+                update_session_context(user_id, user_message, final_response, tools_used_this_session)
+                save_memory()
+                log_handoff_session(user_message, final_response, tools_used=tools_used_this_session)
+                await send_long_message(update, final_response, voice_reply=from_voice)
+                return
 
     # Hit the loop limit - report back
     conversation_history[user_id] = messages
     save_memory()
     await send_long_message(update,
-        f"⚠️ I hit my {MAX_ITERATIONS} step limit. Here's where I got - can you give me more guidance or break it into smaller steps?")
+        f"⚠️ I hit my {MAX_ITERATIONS} step limit. Here's where I got - can you give me more guidance or break it into smaller steps?",
+        voice_reply=from_voice)
 
 # === DAILY STANDUP ===
 STANDUP_HOUR = int(os.environ.get("STANDUP_HOUR", "9"))  # 9 AM default, configurable
@@ -1056,59 +1546,85 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wav_path = ogg_path.replace('.ogg', '.wav')
         await voice_file.download_to_drive(ogg_path)
 
-        # Convert to wav using ffmpeg (macOS has it via homebrew or we use afconvert)
+        # Convert to 16kHz mono WAV (required by whisper models)
         convert_result = subprocess.run(
-            ["ffmpeg", "-i", ogg_path, "-y", wav_path],
+            ["ffmpeg", "-i", ogg_path, "-ar", "16000", "-ac", "1", "-y", wav_path],
             capture_output=True, text=True, timeout=15
         )
         if convert_result.returncode != 0:
             # Try macOS native converter as fallback
             subprocess.run(
-                ["afconvert", "-f", "WAVE", "-d", "LEI16", ogg_path, wav_path],
+                ["afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1", ogg_path, wav_path],
                 capture_output=True, text=True, timeout=15
             )
 
-        # Transcribe using macOS built-in speech recognition or whisper
-        # First try whisper if installed
+        # Transcribe using whisper (pywhispercpp preferred, openai-whisper fallback)
         transcript = None
-        whisper_result = subprocess.run(
-            ["which", "whisper"], capture_output=True, text=True
-        )
-        if whisper_result.returncode == 0:
-            result = subprocess.run(
-                ["whisper", wav_path, "--model", "tiny", "--output_format", "txt", "--output_dir", "/tmp"],
-                capture_output=True, text=True, timeout=60
-            )
-            txt_path = wav_path.replace('.wav', '.txt')
-            if os.path.exists(txt_path):
-                with open(txt_path) as f:
-                    transcript = f.read().strip()
 
-        # Fallback: use Anthropic to describe what to do based on audio duration
+        # Try pywhispercpp first (lightweight, no PyTorch dependency)
+        transcribe_errors = []
         if not transcript:
-            # Use macOS say -v ? to check, or just tell user we need whisper
-            # Try python whisper package
+            try:
+                from pywhispercpp.model import Model as WhisperModel
+                model = WhisperModel("tiny")
+                segments = model.transcribe(wav_path)
+                text = " ".join([seg.text for seg in segments]).strip()
+                if text:
+                    transcript = text
+                else:
+                    transcribe_errors.append("pywhispercpp: empty result")
+            except Exception as e:
+                transcribe_errors.append(f"pywhispercpp: {e}")
+                logging.warning(f"pywhispercpp failed: {e}", exc_info=True)
+
+        # Fallback: try openai-whisper (heavier, requires PyTorch)
+        if not transcript:
             try:
                 import whisper as whisper_pkg
                 model = whisper_pkg.load_model("tiny")
                 result = model.transcribe(wav_path)
                 transcript = result["text"].strip()
             except ImportError:
-                pass
+                transcribe_errors.append("openai-whisper: not installed")
+            except Exception as e:
+                transcribe_errors.append(f"openai-whisper: {e}")
+                logging.warning(f"openai-whisper failed: {e}")
+
+        # Fallback: whisper CLI
+        if not transcript:
+            try:
+                whisper_result = subprocess.run(
+                    ["which", "whisper"], capture_output=True, text=True
+                )
+                if whisper_result.returncode == 0:
+                    result = subprocess.run(
+                        ["whisper", wav_path, "--model", "tiny", "--output_format", "txt", "--output_dir", "/tmp"],
+                        capture_output=True, text=True, timeout=60
+                    )
+                    txt_path = wav_path.replace('.wav', '.txt')
+                    if os.path.exists(txt_path):
+                        with open(txt_path) as f:
+                            transcript = f.read().strip()
+                else:
+                    transcribe_errors.append("whisper CLI: not found")
+            except Exception as e:
+                transcribe_errors.append(f"whisper CLI: {e}")
+                logging.warning(f"whisper CLI failed: {e}")
 
         if not transcript:
+            error_detail = "; ".join(transcribe_errors) if transcribe_errors else "Unknown"
+            logging.error(f"All transcription failed: {error_detail}")
             await update.message.reply_text(
-                "⚠️ Couldn't transcribe. Install whisper:\n"
-                "`pip3 install openai-whisper`\n"
-                "Then restart the bot."
+                f"⚠️ Transcription failed:\n{error_detail}",
+                parse_mode=None
             )
             return
 
         await update.message.reply_text(f"🎤 Heard: \"{transcript}\"")
         log_activity("voice_transcribed", user_id, transcript)
 
-        # Process as a normal text message using text_override
-        await handle_message(update, context, text_override=transcript)
+        # Process as a normal text message using text_override, with voice response
+        await handle_message(update, context, text_override=transcript, from_voice=True)
 
     except Exception as e:
         logging.error(f"Voice handling error: {e}")
@@ -1194,7 +1710,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
         return
     await update.message.reply_text(
-        "🤖 *Claude Bot Commands*\n\n"
+        "🤖 *Piclo Bot Commands*\n\n"
         "/help — Show this list\n"
         "/status — Bot health, uptime, recent activity\n"
         "/cost — Token usage and estimated cost this session\n"
@@ -1223,7 +1739,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     recent_activity = "No log found"
     try:
         result = subprocess.run(
-            "tail -5 /tmp/claudebot_activity.log",
+            "tail -5 /tmp/piclobot_activity.log",
             shell=True, capture_output=True, text=True, timeout=5
         )
         if result.stdout.strip():
@@ -1400,7 +1916,7 @@ def setup_projects_folder():
     with open(instructions_path, 'w') as f:
         f.write("""# Claude Projects — Shared Workspace Instructions
 
-This folder is shared between Cowork (desktop) and Claude Bot (Telegram).
+This folder is shared between Cowork (desktop) and Piclo Bot (Telegram).
 
 ## Automatic Handoff Protocol (ALWAYS ACTIVE)
 
@@ -1409,7 +1925,7 @@ These behaviors are mandatory in EVERY session, without the user asking:
 ### On Session Start
 1. Check if the current project has a HANDOFF.md
 2. If NO: create one immediately before doing any other work. Read existing project files to populate it. Tell the user you created it.
-3. If YES: check the "Last touched" line. If YOU (Cowork) were the last to edit, skip the full re-read — just resume. If Claude Bot was the last to edit, do a full read to absorb new context silently.
+3. If YES: check the "Last touched" line. If YOU (Cowork) were the last to edit, skip the full re-read — just resume. If Piclo Bot was the last to edit, do a full read to absorb new context silently.
 
 ### After Significant Work / End of Session
 1. Update HANDOFF.md automatically — do not wait to be asked
@@ -1431,7 +1947,7 @@ All timestamps: YYYY-MM-DD HH:MM:SS UTC (24-hour, with seconds). No exceptions.
 <2-3 sentences: what this app does, who it's for, how it works>
 
 ## Status: <In Progress | Complete | Blocked | Paused>
-## Last touched: <YYYY-MM-DD HH:MM:SS UTC> by <Cowork (Desktop) | Claude Bot (Telegram)>
+## Last touched: <YYYY-MM-DD HH:MM:SS UTC> by <Cowork (Desktop) | Piclo Bot (Telegram)>
 
 ### Features
 <Running list — append only, never remove>
@@ -1465,7 +1981,7 @@ Features, Bugs, and Work Log are append-only — they form the project's institu
 All new projects should be created as subfolders here. Each project is independent with its own git repo, HANDOFF.md, and files.
 
 ## Why This Exists
-The user controls their Mac remotely via a Telegram bot (Claude Bot) and also works locally via Cowork. This shared folder + handoff system lets both agents collaborate on the same projects without losing context. If the handoff goes stale, the other agent works blind.
+The user controls their Mac remotely via a Telegram bot (Piclo Bot) and also works locally via Cowork. This shared folder + handoff system lets both agents collaborate on the same projects without losing context. If the handoff goes stale, the other agent works blind.
 """)
         print(f"📝 Created Cowork instructions at {instructions_path}")
 

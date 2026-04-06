@@ -4,11 +4,11 @@
 A Telegram bot that acts as a remote coding agent for macOS. Control your Mac from your phone — write code, run commands, serve web apps, take screenshots, manage projects, and more via Claude (Anthropic's AI). Includes a native macOS menu bar app for lifecycle management.
 
 ## Status: In Progress
-## Last touched: 2026-04-06 16:57:33 UTC by Cowork (Desktop)
+## Last touched: 2026-04-06 23:20:58 UTC by Piclo Bot (Telegram)
 
 ### Features
 - Telegram ID whitelist — only authorized users can control the bot
-- Activity logging — all actions logged to /tmp/claudebot_activity.log
+- Activity logging — all actions logged to /tmp/piclobot_activity.log
 - Rate limiting — 30 calls per 5 minutes per user
 - Emergency kill code — send "killclaudenow" to nuke everything
 - Path restrictions — bot can only access ~/Projects, ~/Desktop, ~/Documents/Claude Projects, /tmp
@@ -47,11 +47,23 @@ A Telegram bot that acts as a remote coding agent for macOS. Control your Mac fr
 - Launch at Login — LaunchAgent for menubar (manages bot lifecycle)
 - Status indicator — polls every 10s, shows Running/Stopped
 - Terminal-free operation — start.command closes Terminal, runs in background
+- macOS .app bundle — "Piclo Bot.app" in /Applications, Launchpad, Spotlight, Dock
+- API Keys in menu bar — Keychain-backed key management UI (set, update, view masked keys)
+- Keychain-first key loading — tries macOS Keychain before falling back to .zshrc
+- One-click key migration — "Migrate .zshrc Keys → Keychain" button in menu bar
+- Restart Bot menu item — stop + start in one click
+- User-selectable projects folder — native macOS folder picker on first launch
+- Change projects folder from menu bar — updates config and restarts bot
+- Config persistence — ~/Library/Application Support/Piclo Bot/config.json
+- Safe process management — PID file only, no pkill (prevents killing other apps)
+- py2app self-contained .app — bundles Python + all deps, no system Python needed
+- pywhispercpp transcription — same Whisper accuracy, ~50MB vs 1.5GB (no PyTorch)
+- Whisper fallback chain — pywhispercpp → openai-whisper → whisper CLI
 - Daily standup — morning project summaries (needs STANDUP_CHAT_ID)
 - Build watcher — monitors background tasks, notifies on completion
 - Shared projects folder — ~/Documents/Claude Projects/ used by both Cowork and bot
 - First-run project migration — auto-copies legacy ~/Projects on startup
-- HANDOFF.md protocol — automatic context handoff between Cowork and Claude Bot
+- HANDOFF.md protocol — automatic context handoff between Cowork and Piclo Bot
 - Skip-if-same-agent — don't re-read HANDOFF.md if you were the last to edit
 
 ### Known Bugs & Issues
@@ -69,6 +81,25 @@ A Telegram bot that acts as a remote coding agent for macOS. Control your Mac fr
 - [FIXED] JobQueue not available — missing python-telegram-bot[job-queue]. Added check with warning.
 
 ### Work Log
+- 2026-04-06 23:20:58 UTC (Piclo Bot) — "Tell me the top ten best writers of all time" → Ha! 🤔 That's a solid question, but it's not really my lane — I'm here to help you build stuff on your Mac, not debate literature!
+- 2026-04-06 23:02:00 UTC (Piclo Bot) — "Hey, what's the weather indicator like right now?" → I don't have a weather tool available — I can't check real-time weather data. 🌤️
+- 2026-04-06 22:57:39 UTC (Piclo Bot) — "How’s my Mac’s health" [tools: system_health]
+- 2026-04-06 22:33:49 UTC (Piclo Bot) — "You can see my texts too right" → Yep! 🎯 I can see your texts in the `.bot_memory.json` file — it shows me the full conversation history including:
+- 2026-04-06 22:32:55 UTC (Piclo Bot) — "No, I sent a voice message but maybe you're reading my transcription and considering that a text, I'" → Ah, that's a good point! 🤔 You're right — I might be treating the transcribed text from your voice message the same as regular text input.
+- 2026-04-06 22:32:31 UTC (Piclo Bot) — "So why didn't you send a voice message at that time?" → Good catch! 🤔 You sent a **text message** ("Great, only send voice messages..."), so I followed the rule and responded with text only.
+- 2026-04-06 22:31:48 UTC (Piclo Bot) — "It's safe." [tools: read_file, read_file, run_command, run_command]
+- 2026-04-06 22:31:30 UTC (Piclo Bot) — "You should now see that you have access to the TTS so that you can send me voice messages back. Conf" → Let me check the bot files to confirm the TTS setup...
+- 2026-04-06 19:57:22 UTC (Piclo Bot) — "Maybe I need to restart you first for that code to take effect?" → Oh yeah, that makes sense! 🎯
+- 2026-04-06 19:55:45 UTC (Piclo Bot) — "I ran out of usage for cowork so it’s not doing anything at the moment. You can make the update and" [tools: read_file, read_file, run_command, run_command, run_command]
+- 2026-04-06 19:55:43 UTC (Piclo Bot) — Changed kill code from 'killclaudenow' to 'killpiclonow'
+- 2026-04-06 19:54:44 UTC (Piclo Bot) — "Can we change it to killpiclonow" → Got it! But hold up — Cowork is actively working in those bot files right now, and you said not to change anything.
+- 2026-04-06 19:48:11 UTC (Piclo Bot) — "Cool and you do still have a kill code" [tools: run_command]
+- 2026-04-06 19:47:51 UTC (Piclo Bot) — "Awesome, so you're set to check that anytime we start a new session where you get closed down and re" → Exactly! 🎯
+- 2026-04-06 19:47:25 UTC (Piclo Bot) — "You should have some persistent memory with a file that we created, are you seeing that file?" [tools: run_command, read_file]
+- 2026-04-06 19:37:30 UTC (Piclo Bot) — User tested voice interaction + handoff from Telegram. Bot didn't have TTS yet, discussed adding it.
+- 2026-04-06 18:30:00 UTC (Cowork) — Full rebrand from "Claude Bot" to "Piclo Bot": renamed all identifiers across bot.py, menubar.py, config.py, setup.py, build_app.sh, start.command, README.md, TODO.md, PRODUCT_ROADMAP.md, HANDOFF.md. Generated custom 1024x1024 purple robot icon (icon_piclo.png + icon_piclo.svg). Built icon.icns for macOS app. Rebuilt py2app bundle as "Piclo Bot.app" with new icon and branding. Installed Python 3.14 via Homebrew, created .venv, resolved all dependency issues. Domain piclobot.com identified as available.
+- 2026-04-06 17:45:00 UTC (Cowork) — Major app architecture overhaul: (1) Created config.py for persistent settings with ~/Library/Application Support/Piclo Bot/config.json. (2) Rewrote menubar.py: user-selectable projects folder via native macOS picker on first launch, change folder from menu bar, safe PID-only process management (removed all pkill — previous version crashed other apps). (3) Updated bot.py: PROJECTS_DIR reads from config, ALLOWED_PATHS uses BOT_OWN_DIR dynamically, whisper transcription now tries pywhispercpp first (50MB, no PyTorch) with openai-whisper and CLI fallbacks. (4) Created setup.py for py2app self-contained .app build. (5) Rewrote build_app.sh to use py2app instead of manual .app shell wrapper.
+- 2026-04-06 17:10:00 UTC (Cowork) — Built macOS .app bundle (build_app.sh → /Applications/Piclo Bot.app). Added Keychain-backed API Keys menu to menubar: set/update/migrate keys, masked display, Keychain-first loading with .zshrc fallback. Added Restart Bot menu item. Updated PRODUCT_ROADMAP.md with .app status.
 - 2026-04-06 16:57:33 UTC (Cowork) — Migration prep: updated all hardcoded paths in bot.py, menubar.py, and start.command from ~/telegram-claude-bot to ~/Documents/Claude Projects/telegram-claude-bot. Ready for Finder move.
 - 2026-04-06 14:00:47 UTC (Cowork) — Created HANDOFF.md. Added handoff skill with auto-create/update behavior, UTC timestamps (HH:MM:SS), skip-if-same-agent optimization. Updated bot system prompt, Cowork instructions, and skill to all use identical handoff protocol.
 - 2026-04-06 ~13:00 UTC (Cowork) — Added /start, /help, /status, /cost, /clear, /projects, /screenshot, /health commands. Added token usage tracking with per-model cost estimation. Added natural language shortcuts for voice commands. Persistent token stats across restarts.
@@ -82,14 +113,17 @@ A Telegram bot that acts as a remote coding agent for macOS. Control your Mac fr
 - Add auto-recovery watchdog (restart bot if it crashes)
 - Add inline keyboards for confirmations (Yes/No buttons)
 - Add live progress streaming (edit message in-place)
-- Package as .app bundle via py2app or PyInstaller
+- Package self-contained .app via py2app (Phase 2 — current .app requires Python installed)
 - Create landing page for product launch
 - See PRODUCT_ROADMAP.md for full go-to-market plan
 
 ### Key Files
 - bot.py — Main Telegram bot (~1300 lines). All tools, handlers, commands, and Claude integration.
-- menubar.py — macOS menu bar app. Start/stop bot, launch at login, status indicator.
-- start.command — Double-click launcher. Starts menubar, closes Terminal window.
+- menubar.py — macOS menu bar app. Start/stop/restart bot, API key management, folder picker, launch at login.
+- config.py — App configuration (projects folder, first-run detection). Stores in ~/Library/Application Support/Piclo Bot/.
+- setup.py — py2app build configuration. Bundles everything into a self-contained .app.
+- build_app.sh — Builds dist/Piclo Bot.app via py2app. Run once, then copy to /Applications.
+- start.command — Double-click launcher (legacy). Starts menubar, closes Terminal window.
 - .bot_memory.json — Persistent memory: conversations + token usage (gitignored)
 - skills/handoff/SKILL.md — Cowork skill for project migration and handoff docs
 - README.md — Feature tracker with all 41+ implemented features
@@ -105,11 +139,13 @@ A Telegram bot that acts as a remote coding agent for macOS. Control your Mac fr
 - ffmpeg for audio conversion
 
 ### Gotchas
-- Requires TELEGRAM_TOKEN and ANTHROPIC_API_KEY in ~/.zshrc
+- API keys: Keychain preferred, .zshrc fallback. Use "Migrate .zshrc Keys → Keychain" in menu bar to move them.
 - macOS Screen Recording permission must be granted manually for screenshots
 - ngrok free tier: only one tunnel at a time, URLs change on restart
 - Whisper requires: pip3 install openai-whisper (+ ffmpeg via homebrew)
 - python-telegram-bot[job-queue] needed for scheduled tasks
 - The .bot_memory.json format changed (now includes token_usage) — backwards compatible with old flat format
 - [MIGRATED] Bot paths updated from ~/telegram-claude-bot to ~/Documents/Claude Projects/telegram-claude-bot
-- After moving the folder, toggle Launch at Login off/on in the menu bar to regenerate the LaunchAgent plist
+- [FIXED] First .app attempt used pkill with broad pattern — crashed other apps. Replaced with PID-only process management.
+- [FIXED] .app couldn't access ~/Documents due to macOS sandbox. Rebuilt as self-contained py2app bundle.
+- PROJECTS_DIR is now dynamic (from config.json), not hardcoded. User picks folder on first launch.

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Start Claude Bot Menu Bar App
+# Start Piclo Bot Menu Bar App
 # Double-click this file to launch — Terminal window will close automatically
 
 cd ~/Documents/Claude\ Projects/telegram-claude-bot

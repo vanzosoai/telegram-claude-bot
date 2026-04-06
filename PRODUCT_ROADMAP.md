@@ -1,6 +1,6 @@
-# Claude Bot — Product Roadmap & Go-to-Market Plan
+# Piclo Bot — Product Roadmap & Go-to-Market Plan
 
-**Last updated:** April 6, 2026
+**Last updated:** April 6, 2026 (evening — major strategy update)
 
 ---
 
@@ -20,8 +20,15 @@ Created by PSPDFKit founder Peter Steinberger. A personal AI agent that connects
 - **Source:** https://github.com/openclaw/openclaw
 - **Threat level:** HIGH — massively adopted, well-funded, multi-platform
 
+### Claude Dispatch (Anthropic — March 2026)
+Official remote control for Cowork/Claude Code from the Claude mobile app. Phone sends tasks, desktop executes. Pro/Max plans required ($20/mo+).
+
+- **Source:** https://support.claude.com/en/articles/13947068-assign-tasks-to-claude-from-anywhere-in-cowork
+- **Known limitations:** No push notifications on task completion. Single conversation thread only — no parallel workflows. Session-based (dies when computer sleeps). Constant permission prompts even with auto-accept. macOS/Windows only.
+- **Threat level:** MEDIUM — covers basics but has real gaps Piclo Bot fills
+
 ### What This Means
-You are NOT going to win by being another "AI assistant on Telegram." Both Claude Code Channels and OpenClaw do that, and they're either free or backed by serious resources. **You need a differentiated angle.**
+Dispatch validates the market — Anthropic shipped exactly this category of product. But it's a remote control for ONE thing. Piclo Bot's angle is being the **always-on, multi-agent command layer** that can orchestrate Claude, other models, and system tools through one interface. Dispatch can't do scheduled tasks, multi-agent routing, voice-first interaction, or 24/7 background operation.
 
 ---
 
@@ -77,6 +84,54 @@ Sell this as a starting point for developers who want to build their own Telegra
 
 ---
 
+## Moat Features (What Dispatch Can't Do)
+
+These are the features that make Piclo Bot genuinely different from Dispatch, Claude Code Channels, and OpenClaw. Ordered by impact × feasibility.
+
+### Tier 1: Build Now (High Impact, 1-2 Sessions Each)
+
+**Voice-First Interface with Voice Responses (TTS)** ✅ SHIPPED
+Voice-to-text via Whisper + text-to-speech responses via macOS `say` (Samantha Enhanced). Emoji stripping, markdown cleanup, smart truncation, proper Telegram voice note format with playback speed controls. Walk your dog, voice-message "deploy staging," hear back "deployed, all tests passing."
+
+**Bundled TTS Engine (Piper TTS)** — PLANNED
+Replace macOS `say` with Piper TTS (ONNX-based, MIT licensed) bundled in the app. 2-3 high-quality voice options included. Models are 15-75MB each, inference is ~1-2 seconds on CPU. Eliminates dependency on macOS voice quality. Fallback to `say` if Piper fails. Optional future upgrade path to ElevenLabs or OpenAI TTS for premium voice quality.
+
+**Seamless Context Handoff (Bot ↔ Cowork)**
+Bot writes structured session logs to HANDOFF.md after every interaction. When you open Cowork at your desk, it knows exactly what you did from your phone — no re-explaining. Implementation: bot appends timestamped summaries to HANDOFF.md after each conversation.
+
+**Extended Screenshot/Visual Verification**
+Already have screenshot-on-demand. Extend: "show me the app" captures a screenshot of a running dev server or specific app window, not just the whole screen. Implementation: `screencapture -l <windowID>` for targeted window capture.
+
+**Smart Notifications / Watchdog Alerts**
+Bot watches log files, build output, server health. Proactively messages you: "your build finished," "disk is 90% full," "server crashed 5 min ago." Not polling — event-driven. Implementation: file watchers + threshold alerts.
+
+### Tier 2: Build Next (High Impact, 3-5 Sessions Each)
+
+**Multi-Agent Router**
+Single Telegram chat routes to different backends based on the task. "Fix the auth bug" → Claude Code CLI (heavy coding). "What's the weather" → Haiku (cheap/fast). "Generate a logo" → image model API. Implementation: lightweight classifier picks the right backend per message. Saves money and unlocks capabilities Claude alone doesn't have.
+
+**Multi-Agent Collaboration**
+Two agents working together: one writes code, another reviews it before sending to you. Or one plans, one executes. Implementation: chain API calls — agent A output feeds as input to agent B. Start with "auto-review mode" where a cheaper model sanity-checks responses.
+
+**Scheduled/Background Tasks**
+"Every morning at 8am, check my GitHub repos for new issues and summarize them." "Run tests every hour and alert me if something breaks." Implementation: APScheduler integration (python-telegram-bot already supports job queues). This is something Dispatch literally cannot do.
+
+**File Shuttle**
+"Send me the latest build" → bot zips and sends via Telegram. Forward a file to the bot → it lands on your desktop. Telegram's file API handles up to 2GB. Implementation: file upload/download handlers in the bot.
+
+### Tier 3: Build Later (Medium Impact, Significant Effort)
+
+**Model Switching / Cost Optimization**
+Route simple tasks to cheap models (Haiku, local Ollama), complex tasks to expensive ones (Opus). Show per-message cost. Daily/weekly cost summary. Implementation: token counting + model selection logic + cost tracking DB.
+
+**Cross-Platform Agent Orchestration**
+Control not just Claude but also Codex, local LLMs, custom scripts — all through one Telegram interface. "Use Codex for this PR, Claude for the review." Implementation: plugin architecture where each agent is a module.
+
+**Always-On Server Mode**
+Run Piclo Bot on a cheap VPS or Raspberry Pi so it never sleeps. Your Mac can sleep — the bot stays alive, queues tasks, executes when the Mac wakes. Implementation: separate the "brain" (bot + routing) from the "hands" (Mac tools).
+
+---
+
 ## Feature Roadmap
 
 ### Phase 1: Dogfood & Polish (Weeks 1-2)
@@ -118,15 +173,15 @@ Sell this as a starting point for developers who want to build their own Telegra
 | Pinned project context | ⬜ Not started | P2 | `/project myapp` — all commands scoped to that project |
 | Dark mode app preview | ⬜ Not started | P2 | Screenshot with dark mode forced |
 | Diff viewer in Telegram | ⬜ Not started | P3 | Syntax-highlighted code diffs as images |
-| Audio responses | ⬜ Not started | P3 | TTS for hands-free coding updates |
+| Audio responses | ✅ Done | P3 | TTS via macOS say + opus encoding. Piper TTS bundling planned for v2. |
 
 ### Phase 4: Productize (Weeks 7-8)
 *Package for sale*
 
 | Task | Status | Priority | Notes |
 |------|--------|----------|-------|
-| .app bundle via py2app or PyInstaller | ⬜ Not started | P0 | Drag-to-Applications installer |
-| .dmg with background image | ⬜ Not started | P1 | Professional installer feel |
+| .app bundle via py2app or PyInstaller | 🔶 Phase 1 done | P0 | Lightweight .app wrapper in /Applications via build_app.sh. Phase 2: py2app for self-contained bundle (no Python install needed). |
+| .dmg with background image | ⬜ Not started | P1 | Professional installer feel. Requires py2app .app first. |
 | Auto-update mechanism | ⬜ Not started | P1 | Check GitHub releases, prompt to update |
 | Landing page | ⬜ Not started | P1 | Video demo, feature list, buy button |
 | Stripe/Gumroad payment integration | ⬜ Not started | P1 | |
