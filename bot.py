@@ -804,22 +804,37 @@ Never touch system files, never use sudo, never modify anything outside these fo
 
 HANDOFF DOCS — CRITICAL WORKFLOW:
 Every project in {PROJECTS_DIR} should have a HANDOFF.md in its root.
-- BEFORE starting work on a project: read its HANDOFF.md to get context
+- BEFORE starting work: check the "Last touched" line in HANDOFF.md. If it says "by Claude Bot (Telegram)" then YOU were the last to edit — skip the full re-read and just resume working. If it says "by Cowork (Desktop)" then the OTHER agent made changes — do a full read to absorb new context.
+- If no HANDOFF.md exists, create one before doing any other work.
 - AFTER completing work: update HANDOFF.md with what you did and what's next
-- Use this format:
+- ALL timestamps must be UTC 24-hour format with seconds: YYYY-MM-DD HH:MM:SS UTC
+- Use Python: datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+- HANDOFF.md format:
   # Project: <name>
+  ## Summary
+  <2-3 sentences: what this app does, who it's for, how it works>
   ## Status: <In Progress | Complete | Blocked | Paused>
-  ## Last touched: <date> by Claude Bot (Telegram)
-  ### What was done
-  - <bullet points of completed work>
-  ### Next steps
+  ## Last touched: <YYYY-MM-DD HH:MM:SS UTC> by Claude Bot (Telegram)
+  ### Features
+  <Running list — append only, never remove>
+  - <feature> — <one-line description>
+  ### Known Bugs & Issues
+  <Running list — mark [FIXED] when resolved, never delete entries>
+  - [FIXED] <bug> — <what fixed it>
+  - [OPEN] <bug> — <context>
+  ### Work Log
+  <Append-only, newest first. Each entry gets UTC timestamp + agent name.>
+  - YYYY-MM-DD HH:MM:SS UTC (Claude Bot) — <what was done>
+  ### Next Steps
   - <what should be done next>
-  ### Key files
-  - <important files and what they do>
+  ### Key Files
+  - <filename> — <what it does>
+  ### Tech Stack
+  - <languages, frameworks, dependencies>
   ### Gotchas
   - <anything the next agent needs to know>
 
-This handoff system lets the user switch between Cowork (desktop) and this bot (mobile) seamlessly. Both agents read and write HANDOFF.md. Always keep it current.
+This handoff system lets the user switch between Cowork (desktop) and this bot (mobile) seamlessly. Both agents read and write HANDOFF.md. Always keep it current. Features and Bugs sections are the project's institutional memory — never remove entries.
 
 To show an app to the user via a public URL:
 Use the serve_project tool with the project folder path. It handles everything (kills old servers, starts new one, starts ngrok if needed, returns the public URL) in one step. DO NOT manually start servers or ngrok — always use serve_project.
@@ -1379,50 +1394,78 @@ def setup_projects_folder():
             print(f"📦 Migrated {migrated} project(s) from ~/Projects to {PROJECTS_DIR}")
             log_activity("setup", detail=f"Migrated {migrated} projects")
 
-    # Create a .cowork-instructions file for Cowork integration
+    # Create/update Cowork instructions for handoff protocol (always overwrite to stay in sync)
     instructions_path = os.path.join(PROJECTS_DIR, ".claude", "instructions.md")
-    if not os.path.exists(instructions_path):
-        os.makedirs(os.path.dirname(instructions_path), exist_ok=True)
-        with open(instructions_path, 'w') as f:
-            f.write("""# Claude Projects — Shared Workspace Instructions
+    os.makedirs(os.path.dirname(instructions_path), exist_ok=True)
+    with open(instructions_path, 'w') as f:
+        f.write("""# Claude Projects — Shared Workspace Instructions
 
 This folder is shared between Cowork (desktop) and Claude Bot (Telegram).
 
-## HANDOFF.md Protocol
+## Automatic Handoff Protocol (ALWAYS ACTIVE)
 
-Every project in this folder should have a `HANDOFF.md` in its root. This file enables seamless context handoff between agents.
+These behaviors are mandatory in EVERY session, without the user asking:
 
-**Before starting work on any project:** Read its HANDOFF.md to understand current status, what was last done, and what's next.
+### On Session Start
+1. Check if the current project has a HANDOFF.md
+2. If NO: create one immediately before doing any other work. Read existing project files to populate it. Tell the user you created it.
+3. If YES: check the "Last touched" line. If YOU (Cowork) were the last to edit, skip the full re-read — just resume. If Claude Bot was the last to edit, do a full read to absorb new context silently.
 
-**After completing work on any project:** Update its HANDOFF.md with:
-- What you did (bullet points)
-- What should be done next
-- Any gotchas or context the next agent needs
+### After Significant Work / End of Session
+1. Update HANDOFF.md automatically — do not wait to be asked
+2. Add new features to the Features list
+3. Log bugs found or fixed in Known Bugs & Issues
+4. Add a Work Log entry with UTC timestamp
+5. Update Next Steps
 
-### HANDOFF.md Format:
+The user should NEVER have to ask for handoff updates. They happen automatically.
+
+## Timestamp Format
+All timestamps: YYYY-MM-DD HH:MM:SS UTC (24-hour, with seconds). No exceptions.
+
+## HANDOFF.md Format
 ```
 # Project: <name>
+
+## Summary
+<2-3 sentences: what this app does, who it's for, how it works>
+
 ## Status: <In Progress | Complete | Blocked | Paused>
-## Last touched: <date> by <Cowork | Claude Bot (Telegram)>
+## Last touched: <YYYY-MM-DD HH:MM:SS UTC> by <Cowork (Desktop) | Claude Bot (Telegram)>
 
-### What was done
-- <completed work>
+### Features
+<Running list — append only, never remove>
+- <feature> — <one-line description>
 
-### Next steps
-- <what to do next>
+### Known Bugs & Issues
+<Mark [FIXED] when resolved, never delete entries>
+- [FIXED] <bug> — <what fixed it>
+- [OPEN] <bug> — <context>
 
-### Key files
-- <important files and their purpose>
+### Work Log
+<Append-only, newest first>
+- <YYYY-MM-DD HH:MM:SS UTC> (<agent>) — <what was done>
+
+### Next Steps
+- <what to do next, in priority order>
+
+### Key Files
+- <filename> — <what it does>
+
+### Tech Stack
+- <languages, frameworks, dependencies>
 
 ### Gotchas
 - <anything the next agent needs to know>
 ```
 
+Features, Bugs, and Work Log are append-only — they form the project's institutional memory. Never remove entries. Mark bugs [FIXED] when resolved.
+
 ## Folder Structure
-All new projects should be created as subfolders here. Each is an independent project with its own git repo, HANDOFF.md, and files.
+All new projects should be created as subfolders here. Each project is independent with its own git repo, HANDOFF.md, and files.
 
 ## Why This Exists
-The user controls their Mac remotely via a Telegram bot (Claude Bot) and also works locally via Cowork. This shared folder + handoff system lets both agents collaborate on the same projects without losing context.
+The user controls their Mac remotely via a Telegram bot (Claude Bot) and also works locally via Cowork. This shared folder + handoff system lets both agents collaborate on the same projects without losing context. If the handoff goes stale, the other agent works blind.
 """)
         print(f"📝 Created Cowork instructions at {instructions_path}")
 
