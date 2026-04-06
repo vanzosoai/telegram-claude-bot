@@ -495,10 +495,10 @@ def classify_complexity(message):
             return "claude-sonnet-4-5-20250514"
     return "claude-haiku-4-5-20251001"
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, text_override=None):
     user_id = update.effective_user.id
     user_name = update.effective_user.username or "unknown"
-    user_message = update.message.text
+    user_message = text_override or update.message.text
 
     log_activity("message_received", user_id, f"@{user_name}: {user_message[:200]}")
 
@@ -846,9 +846,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🎤 Heard: \"{transcript}\"")
         log_activity("voice_transcribed", user_id, transcript)
 
-        # Process as a normal text message
-        update.message.text = transcript
-        await handle_message(update, context)
+        # Process as a normal text message using text_override
+        await handle_message(update, context, text_override=transcript)
 
     except Exception as e:
         logging.error(f"Voice handling error: {e}")
@@ -892,8 +891,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # If there's a caption, treat it as an instruction about the file
         if update.message.caption:
-            update.message.text = f"I just uploaded a file to {save_path}. {update.message.caption}"
-            await handle_message(update, context)
+            caption_text = f"I just uploaded a file to {save_path}. {update.message.caption}"
+            await handle_message(update, context, text_override=caption_text)
     except Exception as e:
         await update.message.reply_text(f"⚠️ Upload failed: {str(e)[:200]}")
 
@@ -920,8 +919,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_activity("photo_saved", user_id, save_path)
 
         if update.message.caption:
-            update.message.text = f"I just uploaded a photo to {save_path}. {update.message.caption}"
-            await handle_message(update, context)
+            caption_text = f"I just uploaded a photo to {save_path}. {update.message.caption}"
+            await handle_message(update, context, text_override=caption_text)
     except Exception as e:
         await update.message.reply_text(f"⚠️ Photo save failed: {str(e)[:200]}")
 
