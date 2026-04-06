@@ -214,11 +214,15 @@ def load_memory():
 # Change this to your secret kill code
 KILL_CODE = "killclaudenow"
 
+# Shared projects folder — both Cowork and Claude Bot use this
+PROJECTS_DIR = os.path.expanduser("~/Documents/Claude Projects")
+
 # Only allow operations in these folders
 ALLOWED_PATHS = [
-    "/Users/johnjurkoii/Projects",
-    "/Users/johnjurkoii/telegram-claude-bot",
-    "/Users/johnjurkoii/Desktop",
+    PROJECTS_DIR,
+    os.path.expanduser("~/Projects"),  # legacy path
+    os.path.expanduser("~/telegram-claude-bot"),
+    os.path.expanduser("~/Desktop"),
     "/tmp",
 ]
 
@@ -331,7 +335,7 @@ tools = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Full path to the folder to serve (e.g. /Users/johnjurkoii/Projects/todo-app)"},
+                "path": {"type": "string", "description": "Full path to the folder to serve (e.g. ~/Documents/Claude Projects/todo-app)"},
                 "port": {"type": "integer", "description": "Port to serve on (default 8080)"}
             },
             "required": ["path"]
@@ -402,30 +406,45 @@ def execute_tool(tool_name, tool_input, chat_id=None):
             return f"File written successfully to {path}"
 
         elif tool_name == "list_projects":
-            projects_dir = os.path.expanduser("~/Projects")
-            if not os.path.exists(projects_dir):
-                return "~/Projects directory not found"
+            # Check both new and legacy project folders
+            dirs_to_check = [PROJECTS_DIR, os.path.expanduser("~/Projects")]
             entries = []
-            for name in sorted(os.listdir(projects_dir)):
-                full_path = os.path.join(projects_dir, name)
-                if os.path.isdir(full_path):
-                    mtime = datetime.fromtimestamp(os.path.getmtime(full_path)).strftime("%Y-%m-%d %H:%M")
-                    git_status = ""
-                    if os.path.isdir(os.path.join(full_path, ".git")):
-                        try:
-                            branch = subprocess.run(
-                                ["git", "-C", full_path, "branch", "--show-current"],
-                                capture_output=True, text=True, timeout=5
-                            ).stdout.strip()
-                            dirty = subprocess.run(
-                                ["git", "-C", full_path, "status", "--porcelain"],
-                                capture_output=True, text=True, timeout=5
-                            ).stdout.strip()
-                            git_status = f" [git: {branch}{'*' if dirty else ''}]"
-                        except:
-                            git_status = " [git]"
-                    entries.append(f"📁 {name} — {mtime}{git_status}")
-            return "\n".join(entries) if entries else "No projects found in ~/Projects"
+            for projects_dir in dirs_to_check:
+                if not os.path.exists(projects_dir):
+                    continue
+                label = "" if projects_dir == PROJECTS_DIR else " (legacy)"
+                for name in sorted(os.listdir(projects_dir)):
+                    full_path = os.path.join(projects_dir, name)
+                    if os.path.isdir(full_path) and not name.startswith('.'):
+                        mtime = datetime.fromtimestamp(os.path.getmtime(full_path)).strftime("%Y-%m-%d %H:%M")
+                        git_status = ""
+                        if os.path.isdir(os.path.join(full_path, ".git")):
+                            try:
+                                branch = subprocess.run(
+                                    ["git", "-C", full_path, "branch", "--show-current"],
+                                    capture_output=True, text=True, timeout=5
+                                ).stdout.strip()
+                                dirty = subprocess.run(
+                                    ["git", "-C", full_path, "status", "--porcelain"],
+                                    capture_output=True, text=True, timeout=5
+                                ).stdout.strip()
+                                git_status = f" [git: {branch}{'*' if dirty else ''}]"
+                            except:
+                                git_status = " [git]"
+                        # Read handoff status if it exists
+                        handoff_status = ""
+                        handoff_path = os.path.join(full_path, "HANDOFF.md")
+                        if os.path.exists(handoff_path):
+                            try:
+                                with open(handoff_path) as hf:
+                                    for line in hf:
+                                        if line.startswith("## Status:"):
+                                            handoff_status = f" → {line.strip().replace('## Status:', '').strip()}"
+                                            break
+                            except:
+                                pass
+                        entries.append(f"📁 {name}{label} — {mtime}{git_status}{handoff_status}")
+            return "\n".join(entries) if entries else "No projects found"
 
         elif tool_name == "screenshot":
             display = tool_input.get("display", "all")
@@ -772,25 +791,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
             system=f"""You are a coding agent on the user's Mac. Be concise and efficient - we're on mobile.
 You have tools to run shell commands, read and write files, list projects, and take screenshots.
 Home directory: /Users/johnjurkoii
-Projects: /Users/johnjurkoii/Projects
+Projects: {PROJECTS_DIR}
 
 You can ONLY work within these folders:
-- /Users/johnjurkoii/Projects (for all projects)
-- /Users/johnjurkoii/telegram-claude-bot (for bot files)
+- {PROJECTS_DIR} (primary — all new projects go here)
+- /Users/johnjurkoii/Projects (legacy projects)
+- /Users/johnjurkoii/telegram-claude-bot (bot files)
 - /Users/johnjurkoii/Desktop
 - /tmp
 
 Never touch system files, never use sudo, never modify anything outside these folders.
+
+HANDOFF DOCS — CRITICAL WORKFLOW:
+Every project in {PROJECTS_DIR} should have a HANDOFF.md in its root.
+- BEFORE starting work on a project: read its HANDOFF.md to get context
+- AFTER completing work: update HANDOFF.md with what you did and what's next
+- Use this format:
+  # Project: <name>
+  ## Status: <In Progress | Complete | Blocked | Paused>
+  ## Last touched: <date> by Claude Bot (Telegram)
+  ### What was done
+  - <bullet points of completed work>
+  ### Next steps
+  - <what should be done next>
+  ### Key files
+  - <important files and what they do>
+  ### Gotchas
+  - <anything the next agent needs to know>
+
+This handoff system lets the user switch between Cowork (desktop) and this bot (mobile) seamlessly. Both agents read and write HANDOFF.md. Always keep it current.
 
 To show an app to the user via a public URL:
 Use the serve_project tool with the project folder path. It handles everything (kills old servers, starts new one, starts ngrok if needed, returns the public URL) in one step. DO NOT manually start servers or ngrok — always use serve_project.
 
 Stop server: lsof -ti:8080 | xargs kill -9 2>/dev/null
 
-You have a list_projects tool to show all projects in ~/Projects with git status.
-You have a screenshot tool to capture the screen.
-
 IMPORTANT: Complete tasks in as few steps as possible. Do not repeat failed commands.
+All new projects should be created in {PROJECTS_DIR}.
 You are running as: {model_label} {"Haiku (fast)" if "haiku" in model else "Sonnet (powerful)"}""",
             messages=messages,
             tools=tools
@@ -887,11 +924,13 @@ async def daily_standup(context):
         return
 
     try:
-        projects_dir = os.path.expanduser("~/Projects")
         summary_parts = ["☀️ *Morning Standup*\n"]
+        dirs_to_scan = [PROJECTS_DIR, os.path.expanduser("~/Projects")]
 
-        if os.path.exists(projects_dir):
-            for name in sorted(os.listdir(projects_dir)):
+        for projects_dir in dirs_to_scan:
+          if not os.path.exists(projects_dir):
+              continue
+          for name in sorted(os.listdir(projects_dir)):
                 full_path = os.path.join(projects_dir, name)
                 if os.path.isdir(full_path) and os.path.isdir(os.path.join(full_path, ".git")):
                     try:
@@ -1311,9 +1350,87 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_long_message(update, result)
 
 
+def setup_projects_folder():
+    """First-run setup: create shared projects folder and migrate legacy projects"""
+    import shutil
+
+    # Create the shared folder if it doesn't exist
+    if not os.path.exists(PROJECTS_DIR):
+        os.makedirs(PROJECTS_DIR, exist_ok=True)
+        print(f"📁 Created shared projects folder: {PROJECTS_DIR}")
+        log_activity("setup", detail=f"Created {PROJECTS_DIR}")
+
+    # Check for legacy ~/Projects and offer to migrate
+    legacy_dir = os.path.expanduser("~/Projects")
+    if os.path.exists(legacy_dir):
+        migrated = 0
+        for name in os.listdir(legacy_dir):
+            src = os.path.join(legacy_dir, name)
+            dst = os.path.join(PROJECTS_DIR, name)
+            if os.path.isdir(src) and not os.path.exists(dst):
+                try:
+                    # Symlink instead of move — keeps old paths working
+                    shutil.copytree(src, dst, symlinks=True)
+                    migrated += 1
+                    print(f"  📋 Copied project: {name}")
+                except Exception as e:
+                    print(f"  ⚠️ Failed to copy {name}: {e}")
+        if migrated:
+            print(f"📦 Migrated {migrated} project(s) from ~/Projects to {PROJECTS_DIR}")
+            log_activity("setup", detail=f"Migrated {migrated} projects")
+
+    # Create a .cowork-instructions file for Cowork integration
+    instructions_path = os.path.join(PROJECTS_DIR, ".claude", "instructions.md")
+    if not os.path.exists(instructions_path):
+        os.makedirs(os.path.dirname(instructions_path), exist_ok=True)
+        with open(instructions_path, 'w') as f:
+            f.write("""# Claude Projects — Shared Workspace Instructions
+
+This folder is shared between Cowork (desktop) and Claude Bot (Telegram).
+
+## HANDOFF.md Protocol
+
+Every project in this folder should have a `HANDOFF.md` in its root. This file enables seamless context handoff between agents.
+
+**Before starting work on any project:** Read its HANDOFF.md to understand current status, what was last done, and what's next.
+
+**After completing work on any project:** Update its HANDOFF.md with:
+- What you did (bullet points)
+- What should be done next
+- Any gotchas or context the next agent needs
+
+### HANDOFF.md Format:
+```
+# Project: <name>
+## Status: <In Progress | Complete | Blocked | Paused>
+## Last touched: <date> by <Cowork | Claude Bot (Telegram)>
+
+### What was done
+- <completed work>
+
+### Next steps
+- <what to do next>
+
+### Key files
+- <important files and their purpose>
+
+### Gotchas
+- <anything the next agent needs to know>
+```
+
+## Folder Structure
+All new projects should be created as subfolders here. Each is an independent project with its own git repo, HANDOFF.md, and files.
+
+## Why This Exists
+The user controls their Mac remotely via a Telegram bot (Claude Bot) and also works locally via Cowork. This shared folder + handoff system lets both agents collaborate on the same projects without losing context.
+""")
+        print(f"📝 Created Cowork instructions at {instructions_path}")
+
+
 def main():
     check_single_instance()
     load_memory()
+    setup_projects_folder()
     log_activity("bot_started", detail=f"whitelist={ALLOWED_USER_IDS or 'NONE - UNSECURED'}")
 
     if not ALLOWED_USER_IDS:
