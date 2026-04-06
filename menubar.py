@@ -62,7 +62,7 @@ class ClaudeBotApp(rumps.App):
 
     def is_bot_running(self):
         result = subprocess.run(
-            ["pgrep", "-f", "bot.py"],
+            ["pgrep", "-f", "telegram-claude-bot/bot.py"],
             capture_output=True,
             text=True
         )
@@ -127,18 +127,23 @@ class ClaudeBotApp(rumps.App):
         self.update_status()
 
     def stop_bot(self, _):
-        subprocess.run(["pkill", "-f", "bot.py"])
-        subprocess.run(["pkill", "-f", "ngrok"])
-        subprocess.run(["lsof", "-ti:8080", "|", "xargs", "kill", "-9"],
-                      shell=False, capture_output=True)
+        subprocess.run(["pkill", "-f", "telegram-claude-bot/bot.py"], capture_output=True)
+        subprocess.run(["pkill", "-f", "ngrok"], capture_output=True)
+        subprocess.run("lsof -ti:8080 | xargs kill -9 2>/dev/null", shell=True, capture_output=True)
         rumps.notification("Claude Bot", "Stopped", "🤖 Bot + ngrok stopped.")
+        time.sleep(1)
         self.update_status()
 
     def toggle_launch_at_login(self, _):
         if self.is_launch_at_login_enabled():
-            subprocess.run(["launchctl", "unload", PLIST_PATH])
-            os.remove(PLIST_PATH)
-            rumps.notification("Claude Bot", "Launch at Login Disabled", "Bot will not start automatically.")
+            # Unload the plist (stops auto-launch) but don't kill the running bot
+            subprocess.run(["launchctl", "unload", PLIST_PATH], capture_output=True)
+            try:
+                os.remove(PLIST_PATH)
+            except:
+                pass
+            rumps.notification("Claude Bot", "Launch at Login Disabled",
+                             "Bot won't auto-start on login. Currently running bot is unaffected.")
         else:
             env = self.load_env()
             telegram_token = env.get("TELEGRAM_TOKEN", "")
@@ -151,8 +156,9 @@ class ClaudeBotApp(rumps.App):
             os.makedirs(os.path.dirname(PLIST_PATH), exist_ok=True)
             with open(PLIST_PATH, 'w') as f:
                 f.write(plist)
-            subprocess.run(["launchctl", "load", PLIST_PATH])
-            rumps.notification("Claude Bot", "Launch at Login Enabled", "Bot will start automatically on login.")
+            subprocess.run(["launchctl", "load", PLIST_PATH], capture_output=True)
+            rumps.notification("Claude Bot", "Launch at Login Enabled",
+                             "Bot will start automatically on login.")
         self.update_status()
 
     @rumps.timer(10)
