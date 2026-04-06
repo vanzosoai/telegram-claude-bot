@@ -2,10 +2,23 @@ import rumps
 import subprocess
 import os
 import time
+import tempfile
+import base64
 
 PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/com.johnjurkoii.claudebot.plist")
 BOT_PATH = "/Users/johnjurkoii/telegram-claude-bot/bot.py"
 NGROK_PATH = "/opt/homebrew/bin/ngrok"
+
+# Base64-encoded 44x44 PNG template icon (terminal prompt silhouette)
+ICON_B64 = "iVBORw0KGgoAAAANSUhEUgAAACwAAAAsCAYAAAAehFoBAAABBUlEQVR4nO2Y0Q7DIAhFcdn//7J7WJa0FoSLRerieVlqajilBFyJNpu1KYZ7arjFFdHrpWzMkO3G7QlnyXbjS6mXZItwD7qOcHLkMmyRPV6j6ygnH62GH8dywtxr4krC+zo9dONbMjxTVo2nCc+WVeN6aji1P6PCtfmdDiLcSlZmLRxEGJ2KIaAlUcjeCkPwDg5JOlx8ZNKllMjoaOZKJLR3jwpzZfDYDFuPobfydu6zHpCQbJseFBVOyeqRkUn3Y+oBaWTSSUMkFLQkCn0zbRW9/YE8XSLrjExEC/6n28LRbOFo/k54ic+tbZ+dLd3GK+KFsjGDi1+vJFInmhR/uU9Vm03DByh8JlOOc1CHAAAAAElFTkSuQmCC"
+
+def get_icon_path():
+    """Create a temporary icon file from embedded base64 data"""
+    icon_path = os.path.join(tempfile.gettempdir(), "claudebot_icon.png")
+    if not os.path.exists(icon_path):
+        with open(icon_path, 'wb') as f:
+            f.write(base64.b64decode(ICON_B64))
+    return icon_path
 
 PLIST_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -34,7 +47,8 @@ PLIST_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
 
 class ClaudeBotApp(rumps.App):
     def __init__(self):
-        super(ClaudeBotApp, self).__init__("🤖")
+        icon_path = get_icon_path()
+        super(ClaudeBotApp, self).__init__("", icon=icon_path, template=True)
         self.menu = [
             rumps.MenuItem("Status: Checking...", callback=None),
             None,

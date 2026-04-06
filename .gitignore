@@ -1,0 +1,10 @@
+# Bot runtime data
+.bot_memory.json
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Environment
+.env
