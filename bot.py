@@ -30,7 +30,7 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
 # Whitelist: comma-separated Telegram user IDs in env var, e.g. "123456789,987654321"
 # If not set, bot will reject all users and log their IDs so you can add them
-ALLOWED_USER_IDS_RAW = os.environ.get("ALLOWED_TELEGRAM_IDS", "")
+ALLOWED_USER_IDS_RAW = os.environ.get("ALLOWED_TELEGRAM_IDS", "8687978775")
 ALLOWED_USER_IDS = set()
 if ALLOWED_USER_IDS_RAW.strip():
     for uid in ALLOWED_USER_IDS_RAW.split(","):
@@ -587,19 +587,19 @@ def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Schedule daily standup
-    if STANDUP_CHAT_ID:
-        job_queue = app.job_queue
-        job_queue.run_daily(
-            daily_standup,
-            time=dt_time(hour=STANDUP_HOUR, minute=0),
-            name="daily_standup"
-        )
-        print(f"Daily standup scheduled for {STANDUP_HOUR}:00 -> chat {STANDUP_CHAT_ID}")
-
-    # Schedule build checker (every 10 seconds)
+    # Schedule jobs (requires pip install "python-telegram-bot[job-queue]")
     job_queue = app.job_queue
-    job_queue.run_repeating(check_builds, interval=10, first=10, name="build_checker")
+    if job_queue is not None:
+        if STANDUP_CHAT_ID:
+            job_queue.run_daily(
+                daily_standup,
+                time=dt_time(hour=STANDUP_HOUR, minute=0),
+                name="daily_standup"
+            )
+            print(f"Daily standup scheduled for {STANDUP_HOUR}:00 -> chat {STANDUP_CHAT_ID}")
+        job_queue.run_repeating(check_builds, interval=10, first=10, name="build_checker")
+    else:
+        logging.warning("JobQueue not available. Install with: pip install 'python-telegram-bot[job-queue]'")
 
     print("Bot is running with full computer access...")
     print(f"Whitelist: {ALLOWED_USER_IDS or 'NONE - message bot to get your ID'}")
