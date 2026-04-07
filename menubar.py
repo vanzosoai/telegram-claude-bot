@@ -229,12 +229,54 @@ class PicloBotApp(rumps.App):
         self._bot_was_running = False
         self._user_stopped = False  # True when user clicked Stop
 
+        # First-run permission check — make sure Screen Recording is granted
+        # before user walks away from computer
+        self._check_permissions_on_startup()
+
         # Auto-start bot if not already running
         if not self.is_bot_running() and self._has_required_keys():
             self.start_bot(None)
         self.update_status()
         self.update_key_display()
         self.update_folder_display()
+
+    def _check_permissions_on_startup(self):
+        """Check macOS permissions needed for full functionality.
+        Runs on first launch to catch missing permissions before user leaves."""
+        issues = []
+
+        # Test Screen Recording permission by capturing a tiny screenshot
+        test_path = "/tmp/piclobot_perm_test.png"
+        try:
+            result = subprocess.run(
+                ["screencapture", "-x", "-C", test_path],
+                capture_output=True, timeout=5
+            )
+            if result.returncode != 0:
+                issues.append("Screen Recording")
+            elif os.path.exists(test_path):
+                size = os.path.getsize(test_path)
+                if size < 500:
+                    # macOS returns a tiny/blank file when permission is denied
+                    issues.append("Screen Recording")
+                os.remove(test_path)
+            else:
+                issues.append("Screen Recording")
+        except Exception:
+            issues.append("Screen Recording")
+
+        if issues:
+            missing = ", ".join(issues)
+            rumps.notification(
+                "Piclo Bot — Permissions Needed",
+                f"Missing: {missing}",
+                "Open System Settings → Privacy & Security to grant access. "
+                "Screenshots won't work remotely until this is enabled."
+            )
+            # Also open the relevant System Settings pane to make it easy
+            subprocess.Popen([
+                "open", "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+            ])
 
     def _has_required_keys(self):
         """Check if both API keys are available."""

@@ -374,6 +374,181 @@ BLOCKED_COMMANDS = [
     "systemctl",
 ]
 
+# === PICLO OS: PROJECT & AGENT MANAGEMENT ===
+
+# Active project state per user
+active_project = {}  # user_id -> {"name": "RhinoMan", "path": "/path/to/RhinoMan", "mission_control": {...}}
+
+def find_project_folders():
+    """Scan PROJECTS_DIR for folders that contain mission_control.md."""
+    projects = {}
+    if not os.path.exists(PROJECTS_DIR):
+        return projects
+    for name in os.listdir(PROJECTS_DIR):
+        mc_path = os.path.join(PROJECTS_DIR, name, "mission_control.md")
+        if os.path.isfile(mc_path):
+            projects[name.lower()] = {
+                "name": name,
+                "path": os.path.join(PROJECTS_DIR, name),
+                "mission_control_path": mc_path
+            }
+    return projects
+
+def read_mission_control(project_path):
+    """Read and parse mission_control.md for a project. Returns raw text."""
+    mc_path = os.path.join(project_path, "mission_control.md")
+    if not os.path.exists(mc_path):
+        return None
+    try:
+        with open(mc_path, 'r') as f:
+            return f.read()
+    except Exception as e:
+        logging.error(f"Failed to read mission_control.md: {e}")
+        return None
+
+def parse_mission_control_section(mc_text, section_name):
+    """Extract a specific section from mission_control.md by heading."""
+    if not mc_text:
+        return ""
+    import re
+    # Match ## SECTION_NAME through next ## or end of file
+    pattern = rf'^## {re.escape(section_name)}.*?\n(.*?)(?=^## |\Z)'
+    match = re.search(pattern, mc_text, re.MULTILINE | re.DOTALL)
+    return match.group(1).strip() if match else ""
+
+def append_to_action_log(project_path, agent_name, action, status="COMPLETE"):
+    """Append an entry to mission_control.md ACTION LOG section."""
+    mc_path = os.path.join(project_path, "mission_control.md")
+    if not os.path.exists(mc_path):
+        return False
+    try:
+        from datetime import datetime
+        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+        entry = f"- {timestamp} [{agent_name}] {action} — {status}\n"
+
+        with open(mc_path, 'r') as f:
+            content = f.read()
+
+        # Insert after the ACTION LOG header line, before existing entries
+        marker = "## ACTION LOG"
+        if marker in content:
+            # Find the first entry line (starts with "- ") after the marker
+            lines = content.split('\n')
+            insert_idx = None
+            found_header = False
+            for i, line in enumerate(lines):
+                if marker in line:
+                    found_header = True
+                    continue
+                if found_header and (line.startswith('- ') or line.startswith('_')):
+                    # Skip the italicized description line
+                    if line.startswith('_'):
+                        continue
+                    insert_idx = i
+                    break
+                if found_header and line.startswith('## '):
+                    # Next section — insert before it
+                    insert_idx = i
+                    break
+
+            if insert_idx is None and found_header:
+                # No entries yet, find the blank line after description
+                for i, line in enumerate(lines):
+                    if marker in line:
+                        insert_idx = i + 3  # After header + blank + description
+                        break
+
+            if insert_idx:
+                lines.insert(insert_idx, entry.rstrip())
+                content = '\n'.join(lines)
+
+        with open(mc_path, 'w') as f:
+            f.write(content)
+        return True
+    except Exception as e:
+        logging.error(f"Failed to append to action log: {e}")
+        return False
+
+def add_open_item(project_path, item_text):
+    """Add an item to the OPEN ITEMS section of mission_control.md."""
+    mc_path = os.path.join(project_path, "mission_control.md")
+    if not os.path.exists(mc_path):
+        return False
+    try:
+        with open(mc_path, 'r') as f:
+            content = f.read()
+
+        marker = "## OPEN ITEMS"
+        if marker in content:
+            lines = content.split('\n')
+            for i, line in enumerate(lines):
+                if marker in line:
+                    # Find end of open items section (next ## or end)
+                    for j in range(i + 1, len(lines)):
+                        if lines[j].startswith('## '):
+                            lines.insert(j, f"- [ ] {item_text}")
+                            break
+                    else:
+                        lines.append(f"- [ ] {item_text}")
+                    break
+            content = '\n'.join(lines)
+
+        with open(mc_path, 'w') as f:
+            f.write(content)
+        return True
+    except Exception as e:
+        logging.error(f"Failed to add open item: {e}")
+        return False
+
+def get_project_status_digest(project_path, project_name):
+    """Generate a plain-English status digest from mission_control.md."""
+    mc_text = read_mission_control(project_path)
+    if not mc_text:
+        return f"No mission_control.md found for {project_name}."
+
+    priority = parse_mission_control_section(mc_text, "CURRENT PRIORITY")
+    agents = parse_mission_control_section(mc_text, "ACTIVE AGENTS")
+    open_items = parse_mission_control_section(mc_text, "OPEN ITEMS")
+
+    # Get last 5 action log entries
+    log_section = parse_mission_control_section(mc_text, "ACTION LOG")
+    log_lines = [l for l in log_section.split('\n') if l.strip().startswith('- ')][:5]
+    recent_log = '\n'.join(log_lines) if log_lines else "No actions logged yet."
+
+    digest = f"📋 *{project_name} Status*\n\n"
+    digest += f"*Priority:* {priority}\n\n"
+    if agents:
+        digest += f"*Agents:*\n{agents}\n\n"
+    if open_items:
+        open_count = open_items.count('- [ ]')
+        digest += f"*Open Items ({open_count} pending):*\n{open_items}\n\n"
+    digest += f"*Recent Activity:*\n{recent_log}"
+    return digest
+
+def switch_project(user_id, project_name):
+    """Switch the active project for a user. Returns (success, message)."""
+    projects = find_project_folders()
+    key = project_name.lower().replace(" ", "")
+
+    # Try exact match first, then fuzzy
+    match = None
+    for pkey, pdata in projects.items():
+        if key in pkey or pkey in key:
+            match = pdata
+            break
+
+    if not match:
+        available = ', '.join(p["name"] for p in projects.values()) or "none found"
+        return False, f"Project '{project_name}' not found. Available: {available}"
+
+    active_project[user_id] = match
+    return True, f"Switched to *{match['name']}*. Mission control loaded."
+
+def get_active_project(user_id):
+    """Get the active project for a user, or None."""
+    return active_project.get(user_id)
+
+
 tools = [
     {
         "name": "run_command",
@@ -1151,6 +1326,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
         cmd_screenshot: ["take a screenshot", "show my screen", "what's on my screen", "whats on my screen", "screen capture", "screenshot please", "grab my screen", "show me my screen"],
         cmd_health: ["system health", "how's my mac", "hows my mac", "mac health", "check my system", "system status"],
     }
+
+    # Project status shortcuts — these check mission_control.md, not bot health
+    project_status_phrases = ["rhino man status", "rhinoman status", "primal code status",
+                               "project status", "all projects status", "all project status",
+                               "open items", "what's pending", "whats pending"]
+    for phrase in project_status_phrases:
+        if phrase in msg_lower:
+            # Extract project name if mentioned
+            if "all project" in msg_lower:
+                context.args = ["all"]
+            elif "rhino" in msg_lower:
+                context.args = ["RhinoMan"]
+            elif "primal" in msg_lower:
+                context.args = ["PrimalCode"]
+            elif "personal" in msg_lower:
+                context.args = ["PersonalOps"]
+            else:
+                context.args = []
+            await cmd_mc_status(update, context)
+            if from_voice:
+                proj = get_active_project(user_id)
+                proj_name = proj['name'] if proj else 'the project'
+                await send_voice_reply(update, f"Here's the {proj_name} status digest. Check the text for details.")
+            return
     for handler, phrases in shortcut_map.items():
         if any(phrase in msg_lower for phrase in phrases):
             await handler(update, context)
@@ -1717,7 +1916,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/clear — Reset conversation history\n"
         "/projects — List all projects with git status\n"
         "/screenshot — Capture your screen\n"
-        "/health — Mac system health (CPU, RAM, disk, battery)\n\n"
+        "/health — Mac system health (CPU, RAM, disk, battery)\n"
+        "/permissions — Check macOS permissions and dependencies\n"
+        "/project [name] — Switch active project (or show current)\n"
+        "/status [name|all] — Project status from mission control\n\n"
         "You can also just type naturally — Claude handles the rest.\n"
         "Send voice messages, photos, or files too.\n\n"
         "Emergency kill: send `killclaudenow`",
@@ -1881,6 +2083,158 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_long_message(update, result)
 
 
+async def cmd_project(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Switch active project or show current project."""
+    user_id = update.effective_user.id
+    if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
+        return
+
+    args = ' '.join(context.args) if context.args else ''
+
+    if not args:
+        # Show current project
+        proj = get_active_project(user_id)
+        if proj:
+            await update.message.reply_text(f"📂 Active project: *{proj['name']}*\nPath: {proj['path']}", parse_mode="Markdown")
+        else:
+            projects = find_project_folders()
+            if projects:
+                names = ', '.join(p['name'] for p in projects.values())
+                await update.message.reply_text(f"No active project. Available: {names}\n\nUse `/project [name]` to switch.", parse_mode="Markdown")
+            else:
+                await update.message.reply_text("No projects found with mission_control.md. Create a project folder with a mission_control.md file first.")
+        return
+
+    success, msg = switch_project(user_id, args)
+    if success:
+        await update.message.reply_text(f"📂 {msg}", parse_mode="Markdown")
+        # Log the switch
+        proj = get_active_project(user_id)
+        if proj:
+            append_to_action_log(proj['path'], "PICLO", f"Project switched to {proj['name']} by user")
+    else:
+        await update.message.reply_text(msg)
+
+
+async def cmd_mc_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show project status digest from mission_control.md."""
+    user_id = update.effective_user.id
+    if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
+        return
+
+    args = ' '.join(context.args) if context.args else ''
+
+    if args.lower() == 'all':
+        # All projects digest
+        projects = find_project_folders()
+        if not projects:
+            await update.message.reply_text("No projects found with mission_control.md.")
+            return
+        digest = "📋 *All Projects Status*\n\n"
+        for pdata in projects.values():
+            priority = parse_mission_control_section(
+                read_mission_control(pdata['path']), "CURRENT PRIORITY"
+            )
+            agents = parse_mission_control_section(
+                read_mission_control(pdata['path']), "ACTIVE AGENTS"
+            )
+            agent_count = agents.count('Active') if agents else 0
+            digest += f"*{pdata['name']}*: {priority or 'No priority set'} ({agent_count} active agents)\n\n"
+        await send_long_message(update, digest)
+        return
+
+    # Single project — use active or specified
+    if args:
+        success, msg = switch_project(user_id, args)
+        if not success:
+            await update.message.reply_text(msg)
+            return
+
+    proj = get_active_project(user_id)
+    if not proj:
+        projects = find_project_folders()
+        if projects:
+            names = ', '.join(p['name'] for p in projects.values())
+            await update.message.reply_text(f"No active project. Use `/project [name]` first.\nAvailable: {names}", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("No projects found.")
+        return
+
+    digest = get_project_status_digest(proj['path'], proj['name'])
+    await send_long_message(update, digest)
+
+
+async def cmd_permissions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check macOS permissions needed for Piclo Bot features."""
+    user_id = update.effective_user.id
+    if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
+        return
+
+    results = []
+
+    # Test Screen Recording
+    test_path = "/tmp/piclobot_perm_test.png"
+    try:
+        r = subprocess.run(["screencapture", "-x", "-C", test_path],
+                          capture_output=True, timeout=5)
+        if r.returncode == 0 and os.path.exists(test_path) and os.path.getsize(test_path) > 500:
+            results.append("Screen Recording: ✅ Granted")
+        else:
+            results.append("Screen Recording: ❌ NOT GRANTED\n  → System Settings → Privacy & Security → Screen Recording → enable Python/Piclo Bot")
+    except Exception as e:
+        results.append(f"Screen Recording: ⚠️ Could not test ({e})")
+    finally:
+        try:
+            os.remove(test_path)
+        except Exception:
+            pass
+
+    # Test shell access (should always work but good sanity check)
+    try:
+        r = subprocess.run(["echo", "ok"], capture_output=True, text=True, timeout=3)
+        results.append("Shell Access: ✅ Working" if r.returncode == 0 else "Shell Access: ❌ Error")
+    except Exception:
+        results.append("Shell Access: ❌ Not working")
+
+    # Test ffmpeg (needed for voice)
+    try:
+        r = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=3)
+        results.append("ffmpeg (voice notes): ✅ Installed" if r.returncode == 0 else "ffmpeg (voice notes): ❌ Not found")
+    except FileNotFoundError:
+        results.append("ffmpeg (voice notes): ❌ Not installed\n  → brew install ffmpeg")
+
+    # Test say (TTS) — say has no --version flag, so test with empty string
+    try:
+        r = subprocess.run(["which", "say"], capture_output=True, text=True, timeout=3)
+        if r.returncode == 0:
+            results.append("macOS TTS (say): ✅ Available")
+        else:
+            results.append("macOS TTS (say): ❌ Not found")
+    except Exception:
+        results.append("macOS TTS (say): ❌ Not found")
+
+    # Test whisper availability
+    whisper_found = False
+    try:
+        import pywhispercpp
+        results.append("Whisper (voice input): ✅ pywhispercpp installed")
+        whisper_found = True
+    except ImportError:
+        pass
+    if not whisper_found:
+        try:
+            import whisper
+            results.append("Whisper (voice input): ✅ openai-whisper installed")
+            whisper_found = True
+        except ImportError:
+            pass
+    if not whisper_found:
+        results.append("Whisper (voice input): ❌ Not installed\n  → pip3 install pywhispercpp")
+
+    report = "🔐 *Piclo Bot Permission Check*\n\n" + "\n\n".join(results)
+    await send_long_message(update, report)
+
+
 def setup_projects_folder():
     """First-run setup: create shared projects folder and migrate legacy projects"""
     import shutil
@@ -2007,6 +2361,9 @@ def main():
     app.add_handler(CommandHandler("projects", cmd_projects))
     app.add_handler(CommandHandler("screenshot", cmd_screenshot))
     app.add_handler(CommandHandler("health", cmd_health))
+    app.add_handler(CommandHandler("permissions", cmd_permissions))
+    app.add_handler(CommandHandler("project", cmd_project))
+    app.add_handler(CommandHandler("status", cmd_mc_status))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))

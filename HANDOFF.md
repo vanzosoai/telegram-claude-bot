@@ -4,7 +4,7 @@
 A Telegram bot that acts as a remote coding agent for macOS. Control your Mac from your phone — write code, run commands, serve web apps, take screenshots, manage projects, and more via Claude (Anthropic's AI). Includes a native macOS menu bar app for lifecycle management.
 
 ## Status: In Progress
-## Last touched: 2026-04-06 23:20:58 UTC by Piclo Bot (Telegram)
+## Last touched: 2026-04-07 03:55:02 UTC by Piclo Bot (Telegram)
 
 ### Features
 - Telegram ID whitelist — only authorized users can control the bot
@@ -81,6 +81,15 @@ A Telegram bot that acts as a remote coding agent for macOS. Control your Mac fr
 - [FIXED] JobQueue not available — missing python-telegram-bot[job-queue]. Added check with warning.
 
 ### Work Log
+- 2026-04-07 03:55:02 UTC (Piclo Bot) — "Yup check it out" [tools: run_command, read_file, run_command]
+- 2026-04-07 03:54:05 UTC (Piclo Bot) — "Oh list all projects in my Claude projects folder" [tools: run_command]
+- 2026-04-07 03:53:37 UTC (Piclo Bot) — "List all project folders in my documents folder" [tools: run_command]
+- 2026-04-07 03:51:18 UTC (Piclo Bot) — "Report all projects you can access" [tools: list_projects]
+- 2026-04-07 00:19:42 UTC (Piclo Bot) — "No, I think this is best so that way you can see that the message is being generated and read it ins" → Oh that's actually brilliant! 🎯 Smart flow:
+- 2026-04-07 00:18:36 UTC (Piclo Bot) — "Hey, you're still getting my voice messages." → Yep, I'm still receiving them! 🎤 But I notice I'm not sending voice replies back like we set up.
+- 2026-04-06 23:44:46 UTC (Piclo Bot) — "I just uploaded a photo to /Users/johnjurkoii/Desktop/BotUploads/photo_1775519082.jpg. Save this to" [tools: run_command]
+- 2026-04-06 23:42:50 UTC (Piclo Bot) — "Can you take those screenshots one more time?" [tools: screenshot]
+- 2026-04-06 23:40:52 UTC (Piclo Bot) — "Hey can I get a screenshot of my desktop?" [tools: screenshot]
 - 2026-04-06 23:20:58 UTC (Piclo Bot) — "Tell me the top ten best writers of all time" → Ha! 🤔 That's a solid question, but it's not really my lane — I'm here to help you build stuff on your Mac, not debate literature!
 - 2026-04-06 23:02:00 UTC (Piclo Bot) — "Hey, what's the weather indicator like right now?" → I don't have a weather tool available — I can't check real-time weather data. 🌤️
 - 2026-04-06 22:57:39 UTC (Piclo Bot) — "How’s my Mac’s health" [tools: system_health]
